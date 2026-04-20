@@ -1,0 +1,840 @@
+# Headless service
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fid.fullname" . }}-headless
+  labels:
+    {{- include "fid.labels" . | nindent 4 }}
+    app.kubernetes.io/core-name: {{ include "fid.name" . }}
+spec:
+  ports:
+    - port: 9100
+      name: admin-http
+    - port: 9101
+      name: admin-https
+    - port: 2389
+      name: ldap
+    - port: 2636
+      name: ldaps
+  selector:
+    {{- include "fid.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/core-name: {{ include "fid.name" . }}
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ template "fid.fullname" . }}
+  labels:
+    {{- include "fid.labels" . | nindent 4 }}
+    app.kubernetes.io/core-name: {{ include "fid.name" . }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ (.Values.global.hibernate | default false) | ternary 0 .Values.replicaCount }}
+  {{- end }}
+  serviceName: {{ template "fid.fullname" . }}-headless
+  updateStrategy:
+    type: {{ .Values.updateStrategy | default "RollingUpdate" }}
+  selector:
+    matchLabels:
+      {{- include "fid.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/core-name: {{ include "fid.name" . }}
+  template:
+    metadata:
+      {{- $logAnnotations := include "logging.annotations" (dict "component" .Values "context" .) -}}
+      {{- if or $logAnnotations .Values.podAnnotations }}
+      annotations:
+        {{- $logAnnotations | nindent 8 }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/component: fid
+        {{- include "fid.labels" . | nindent 8 }}
+        app.kubernetes.io/core-name: {{ include "fid.name" . }}
+        {{- include "iddm.podLabels" (dict "component" .Values.fid "context" .) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "fid.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 6 }}
+      {{- end }}
+      {{- if .Values.podSecurityContext.enabled }}
+      securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.podSecurityContext "context" $) | nindent 8 }}
+      {{- end }}
+      initContainers:
+  {{- if .Values.zk.external }}
+      - name: check-zk
+        image: alpine:latest
+        imagePullPolicy: IfNotPresent
+        {{- if .Values.securityContext.enabled }}
+        securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.securityContext "context" $) | nindent 10 }}
+        {{- end }}
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        command: ['sh', '-c', 'until nc -w 2 -z $0 $1; do echo Waiting for zookeeper -- $0:$1;sleep 2; done; echo Connection to zookeeper ok -- $0:$1', '{{ (split ":" .Values.zk.connectionString)._0 }}', '{{ (split ":" .Values.zk.connectionString)._1 }}']
+      - name: check-zk-readonly
+        image: alpine/curl:latest
+        imagePullPolicy: IfNotPresent
+        {{- if .Values.securityContext.enabled }}
+        securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.securityContext "context" $) | nindent 10 }}
+        {{- end }}
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        command: ['sh', '-c', 'until $(curl --silent http://$0:8080/commands/is_read_only | grep false >> /dev/null); do echo Waiting for zookeeper to be writeable;sleep 5; done; echo zookeeper is writable', '{{ (split ":" .Values.zk.connectionString)._0 }}']
+  {{- end }}
+  {{- if hasKey .Values.sysctl "enabled" }}
+  {{- if .Values.sysctl.enabled }}
+      - name: sysctl
+        image: busybox:latest
+        imagePullPolicy: IfNotPresent
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        command: ["/bin/sh", "-c", "sysctl -w vm.max_map_count=262144 && sysctl -w fs.inotify.max_user_watches=640000 && sysctl -w fs.inotify.max_user_instances=10000 && set -e && ulimit -n 65536"]
+        securityContext:
+          privileged: true
+  {{- end }}
+  {{- end }}
+
+  {{- /* Advanced migration initContainer (takes precedence) */}}
+  {{- if and (hasKey .Values.fid "migration") (hasKey (.Values.fid.migration) "advanced") (.Values.fid.migration.advanced.enabled) }}
+      - name: migration-advanced
+        {{- $adv := .Values.fid.migration.advanced -}}
+        {{- $src := ( $adv.source | default dict ) -}}
+        {{- $type := ( $src.type | default "" ) -}}
+        {{- if eq $type "http" }}
+        image: {{ default "alpine/curl:latest" $adv.image.http }}
+        {{- else if eq $type "s3" }}
+        image: {{ default "amazon/aws-cli:2.15.40" $adv.image.s3 }}
+        {{- else if eq $type "gcs" }}
+        image: {{ default "gcr.io/google.com/cloudsdktool/google-cloud-cli:slim" $adv.image.gcs }}
+        {{- else if eq $type "azure" }}
+        image: {{ default "mcr.microsoft.com/azure-storage/azcopy:10.24.0" $adv.image.azure }}
+        {{- else if eq $type "git" }}
+        image: {{ default "bitnami/git:latest" $adv.image.git }}
+        {{- else if eq $type "db" }}
+        {{- if eq (default "" $src.db.driver) "mysql" }}
+        image: {{ default "mysql:8.3" $adv.image.db_mysql }}
+        {{- else }}
+        image: {{ default "postgres:16-alpine" $adv.image.db_postgres }}
+        {{- end }}
+        {{- else }}
+        image: {{ default "alpine/curl:latest" $adv.image.http }}
+        {{- end }}
+        imagePullPolicy: {{ default "IfNotPresent" $adv.image.pullPolicy }}
+        {{- if .Values.securityContext.enabled }}
+        securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.securityContext "context" $) | nindent 10 }}
+        {{- end }}
+        resources:
+          limits:
+            cpu: 100m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -euo pipefail
+            echo "Starting advanced migration fetch: type={{ $type }}"
+            {{- if eq $type "http" }}
+            curl -sS {{ (default "" $src.http.flags) }} -o /migrations/export.zip {{ (default "" $src.http.url) }}
+            {{- else if eq $type "s3" }}
+            {{- $bucket := (default "" $src.s3.bucket) -}}
+            {{- $key := (default "" $src.s3.key) -}}
+            {{- $region := (default "" $src.s3.region) -}}
+            {{- $endpoint := (default "" $src.s3.endpoint) -}}
+            aws s3 cp s3://{{ $bucket }}/{{ $key }} /migrations/export.zip{{- if $region }} --region {{ $region }}{{- end }}{{- if $endpoint }} --endpoint-url {{ $endpoint }}{{- end }}
+            {{- else if eq $type "gcs" }}
+            {{- $bucket := (default "" $src.gcs.bucket) -}}
+            {{- $object := (default "" $src.gcs.object) -}}
+            {{/* Prefer new gcloud storage; fallback to gsutil if missing */}}
+            if command -v gcloud >/dev/null 2>&1; then
+              gcloud storage cp gs://{{ $bucket }}/{{ $object }} /migrations/export.zip
+            else
+              gsutil cp gs://{{ $bucket }}/{{ $object }} /migrations/export.zip
+            fi
+            {{- else if eq $type "azure" }}
+            {{- $acct := (default "" $src.azure.accountName) -}}
+            {{- $cont := (default "" $src.azure.container) -}}
+            {{- $blob := (default "" $src.azure.blob) -}}
+            AZ_URL="https://{{ $acct }}.blob.core.windows.net/{{ $cont }}/{{ $blob }}"
+            {{- if and (hasKey $src "azure") (hasKey $src.azure "auth") ($src.azure.auth.managedIdentity) }}
+            azcopy login --identity
+            azcopy copy "$AZ_URL" /migrations/export.zip
+            {{- else if and (hasKey $src "azure") (hasKey $src.azure "auth") (hasKey $src.azure.auth "sasTokenSecretRef") (ne (default "" $src.azure.auth.sasTokenSecretRef.name) "") (ne (default "" $src.azure.auth.sasTokenSecretRef.key) "") }}
+            azcopy copy "$AZ_URL?${AZURE_SAS_TOKEN}" /migrations/export.zip
+            {{- else }}
+            # Using account key via AZCOPY_ACCOUNT_KEY env if provided, otherwise unauthenticated (public blob)
+            azcopy copy "$AZ_URL" /migrations/export.zip
+            {{- end }}
+            {{- else if eq $type "git" }}
+            REPO={{ (default "" $src.git.repo) | quote }}
+            REF={{ (default "main" $src.git.ref) | quote }}
+            PATH_IN_REPO={{ (default "export.zip" $src.git.path) | quote }}
+            mkdir -p /root/.ssh || true
+            if [ -f /root/.ssh/id_rsa ]; then chmod 600 /root/.ssh/id_rsa; fi
+            if [ -f /root/.ssh/known_hosts ]; then chmod 644 /root/.ssh/known_hosts; fi
+            if echo "$REPO" | grep -qE "^git@|^ssh://"; then
+              GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=yes" git clone --branch "$REF" --depth 1 "$REPO" /tmp/repo
+            else
+              git clone --branch "$REF" --depth 1 "$REPO" /tmp/repo
+            fi
+            cp "/tmp/repo/${PATH_IN_REPO}" /migrations/export.zip
+            {{- else if eq $type "db" }}
+            {{- $drv := (default "" $src.db.driver) -}}
+            {{- if eq $drv "mysql" }}
+            mysql --version >/dev/null 2>&1 || true
+            mysql -h {{ default "" $src.db.host }} -P {{ default 3306 $src.db.port }} -u"${DB_USER}" -p"${DB_PASSWORD}" {{ default "" $src.db.database }} -N -e {{ (default "" $src.db.query) | quote }} > /tmp/db.out
+            {{- else }}
+            export PGPASSWORD="${DB_PASSWORD}"
+            psql -h {{ default "" $src.db.host }} -p {{ default 5432 $src.db.port }} -U "${DB_USER}" -d {{ default "" $src.db.database }} -tAc {{ (default "" $src.db.query) | quote }} > /tmp/db.out
+            {{- end }}
+            {{- if eq (default "raw" $src.db.outputEncoding) "base64" }}
+            base64 -d /tmp/db.out > /migrations/export.zip
+            {{- else }}
+            mv /tmp/db.out /migrations/export.zip
+            {{- end }}
+            {{- else }}
+            echo "Unknown advanced source.type='{{ $type }}'" >&2; exit 1
+            {{- end }}
+
+            {{- if and (hasKey $adv "script") (hasKey $adv.script "url") ($adv.script.url) }}
+            # Optional post-migration script over HTTP
+            if command -v curl >/dev/null 2>&1; then
+              curl -sS {{ (default "" $adv.script.flags) }} -o /opt/radiantone/scripts/configure_fid.sh {{ $adv.script.url }}
+            else
+              echo "curl not available to fetch advanced.script.url" >&2
+            fi
+            chmod +x /opt/radiantone/scripts/configure_fid.sh || true
+            {{- end }}
+
+            echo 'Advanced migration artifacts prepared' && ls -ltr /migrations
+        volumeMounts:
+        - name: migrations
+          mountPath: /migrations
+        - name: scripts
+          mountPath: /opt/radiantone/scripts
+        {{- if and (eq $type "git") (hasKey $src "git") (hasKey $src.git "auth") (hasKey $src.git.auth "sshKeySecretRef") (ne (default "" $src.git.auth.sshKeySecretRef.name) "") }}
+        - name: git-ssh-key
+          mountPath: /root/.ssh
+        {{- end }}
+        {{- if and (eq $type "git") (hasKey $src "git") (hasKey $src.git "auth") (hasKey $src.git.auth "knownHostsConfigMapRef") (ne (default "" $src.git.auth.knownHostsConfigMapRef.name) "") (ne (default "" $src.git.auth.knownHostsConfigMapRef.key) "") }}
+        - name: git-known-hosts
+          mountPath: /root/.ssh/known_hosts
+          subPath: {{ $src.git.auth.knownHostsConfigMapRef.key }}
+        {{- end }}
+        {{- if and (eq $type "gcs") (hasKey $src "gcs") (hasKey $src.gcs "auth") (hasKey $src.gcs.auth "serviceAccountKeySecretRef") (ne (default "" $src.gcs.auth.serviceAccountKeySecretRef.name) "") (ne (default "" $src.gcs.auth.serviceAccountKeySecretRef.key) "") }}
+        - name: gcp-sa-key
+          mountPath: /var/secrets/gcp
+        {{- end }}
+        env:
+        {{- if and (eq $type "s3") (hasKey $src "s3") (hasKey $src.s3 "auth") }}
+        {{- if and (hasKey $src.s3.auth "accessKeyIdSecretRef") (ne (default "" $src.s3.auth.accessKeyIdSecretRef.name) "") (ne (default "" $src.s3.auth.accessKeyIdSecretRef.key) "") }}
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ $src.s3.auth.accessKeyIdSecretRef.name }}
+              key: {{ $src.s3.auth.accessKeyIdSecretRef.key }}
+        {{- end }}
+        {{- if and (hasKey $src.s3.auth "secretAccessKeySecretRef") (ne (default "" $src.s3.auth.secretAccessKeySecretRef.name) "") (ne (default "" $src.s3.auth.secretAccessKeySecretRef.key) "") }}
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ $src.s3.auth.secretAccessKeySecretRef.name }}
+              key: {{ $src.s3.auth.secretAccessKeySecretRef.key }}
+        {{- end }}
+        {{- if and (hasKey $src.s3.auth "sessionTokenSecretRef") (ne (default "" $src.s3.auth.sessionTokenSecretRef.name) "") (ne (default "" $src.s3.auth.sessionTokenSecretRef.key) "") }}
+        - name: AWS_SESSION_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ $src.s3.auth.sessionTokenSecretRef.name }}
+              key: {{ $src.s3.auth.sessionTokenSecretRef.key }}
+        {{- end }}
+        {{- if (default "" $src.s3.region) }}
+        - name: AWS_REGION
+          value: {{ $src.s3.region | quote }}
+        {{- end }}
+        {{- end }}
+        {{- if and (eq $type "gcs") (hasKey $src "gcs") (hasKey $src.gcs "auth") (hasKey $src.gcs.auth "serviceAccountKeySecretRef") (ne (default "" $src.gcs.auth.serviceAccountKeySecretRef.name) "") (ne (default "" $src.gcs.auth.serviceAccountKeySecretRef.key) "") }}
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/var/secrets/gcp/{{ $src.gcs.auth.serviceAccountKeySecretRef.key }}"
+        {{- end }}
+        {{- if and (eq $type "azure") (hasKey $src "azure") (hasKey $src.azure "auth") (hasKey $src.azure.auth "sasTokenSecretRef") (ne (default "" $src.azure.auth.sasTokenSecretRef.name) "") (ne (default "" $src.azure.auth.sasTokenSecretRef.key) "") }}
+        - name: AZURE_SAS_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ $src.azure.auth.sasTokenSecretRef.name }}
+              key: {{ $src.azure.auth.sasTokenSecretRef.key }}
+        {{- end }}
+        {{- if and (eq $type "azure") (hasKey $src "azure") (hasKey $src.azure "auth") (hasKey $src.azure.auth "accountKeySecretRef") (ne (default "" $src.azure.auth.accountKeySecretRef.name) "") (ne (default "" $src.azure.auth.accountKeySecretRef.key) "") }}
+        - name: AZCOPY_ACCOUNT_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ $src.azure.auth.accountKeySecretRef.name }}
+              key: {{ $src.azure.auth.accountKeySecretRef.key }}
+        {{- end }}
+        {{- if eq $type "db" }}
+        {{- if and (hasKey $src "db") (hasKey $src.db "userSecretRef") (ne (default "" $src.db.userSecretRef.name) "") (ne (default "" $src.db.userSecretRef.key) "") }}
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: {{ $src.db.userSecretRef.name }}
+              key: {{ $src.db.userSecretRef.key }}
+        {{- end }}
+        {{- if and (hasKey $src "db") (hasKey $src.db "passwordSecretRef") (ne (default "" $src.db.passwordSecretRef.name) "") (ne (default "" $src.db.passwordSecretRef.key) "") }}
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ $src.db.passwordSecretRef.name }}
+              key: {{ $src.db.passwordSecretRef.key }}
+        {{- end }}
+        {{- end }}
+  {{- end }}
+
+  {{- /* Legacy migration initContainer (only when advanced is disabled) */}}
+  {{- if and (not (and (hasKey .Values.fid "migration") (hasKey (.Values.fid.migration) "advanced") (.Values.fid.migration.advanced.enabled))) (hasKey .Values.fid "migration") (hasKey .Values.fid.migration "url") (.Values.fid.migration.url) }}
+      - name: migration
+        image: alpine/curl:latest
+        imagePullPolicy: IfNotPresent
+        {{- if .Values.securityContext.enabled }}
+        securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.securityContext "context" $) | nindent 10 }}
+        {{- end }}
+        resources:
+          limits:
+            cpu: 100m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -ex
+            # Download the curl package
+            # apk add -q --no-cache curl
+            # Download the migrations file
+            curl -sSo /migrations/export.zip {{ .Values.fid.migration.url }}
+
+            echo 'Migration file copied to /migrations/export.zip' && ls -ltr /migrations
+  {{- if and (hasKey .Values.fid "migration") (hasKey .Values.fid.migration "script") .Values.fid.migration.script }}
+            # Download the script
+            curl -sSo /opt/radiantone/scripts/configure_fid.sh {{ .Values.fid.migration.script }}
+            # make it executable
+            chmod +x /opt/radiantone/scripts/configure_fid.sh
+            echo 'Post migration script copied to /opt/radiantone/scripts/configure_fid.sh' && ls -ltr /opt/radiantone/scripts
+  {{- end }}
+        volumeMounts:
+        - name: migrations
+          mountPath: /migrations
+  {{- if and (hasKey .Values.fid "migration") (hasKey .Values.fid.migration "script") .Values.fid.migration.script }}
+        - name: scripts
+          mountPath: /opt/radiantone/scripts
+  {{- end }}
+  {{- end }}
+
+  {{- with .Values.extraInitContainers }}
+      {{- tpl (toYaml .) $ | nindent 6 }}
+  {{- end }}
+
+      containers:
+      - name: {{ include "fid.fullname" . }}
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        {{- if .Values.securityContext.enabled }}
+        securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.securityContext "context" $) | nindent 10 }}
+        {{- end }}
+        lifecycle:
+          postStart:
+            exec:
+              command: ["/bin/sh", "-c", "echo Hello from the myfid postStart handler > /opt/radiantone/vds/lifecycle.txt"]
+          preStop:
+            exec:
+{{- if .Values.fid.detach }}
+              command: ["/opt/radiantone/vds/bin/advanced/cluster.sh", "detach"]
+{{- else }}
+              command: ["/opt/radiantone/vds/bin/stopVDSServer.sh"]
+{{- end }}
+        ports:
+        - containerPort: 2181
+          name: zk-client
+        - containerPort: 7070
+          name: cp-http
+        - containerPort: 7171
+          name: cp-https
+        - containerPort: 9100
+          name: admin-http
+        - containerPort: 9101
+          name: admin-https
+        - containerPort: 2389
+          name: ldap
+        - containerPort: 2636
+          name: ldaps
+        - containerPort: 8089
+          name: http
+        - containerPort: 8090
+          name: https
+        readinessProbe:
+          tcpSocket:
+            port: 2636
+          initialDelaySeconds: {{ .Values.fid.readinessProbe.initialDelaySeconds }}
+          timeoutSeconds: {{ .Values.fid.readinessProbe.timeoutSeconds }}
+          periodSeconds: {{ default 30 .Values.fid.readinessProbe.periodSeconds }}
+          failureThreshold: {{ default 10 .Values.fid.readinessProbe.failureThreshold }}
+          successThreshold: {{ default 1 .Values.fid.readinessProbe.successThreshold }}
+        livenessProbe:
+          exec:
+            command: [ "/opt/radiantone/check", "run", "-type", "liveness" ]
+          initialDelaySeconds: {{ .Values.fid.livenessProbe.initialDelaySeconds }}
+          timeoutSeconds: {{ .Values.fid.livenessProbe.timeoutSeconds }}
+          periodSeconds: {{ default 30 .Values.fid.livenessProbe.periodSeconds }}
+          failureThreshold: {{ default 10 .Values.fid.livenessProbe.failureThreshold }}
+          successThreshold: {{ default 1 .Values.fid.livenessProbe.successThreshold }}
+        startupProbe:
+          exec:
+            command: [ "/opt/radiantone/check", "run", "-type", "liveness" ]
+          initialDelaySeconds: {{ default 0 .Values.fid.startupProbe.initialDelaySeconds }}
+          timeoutSeconds: {{ default 5 .Values.fid.startupProbe.timeoutSeconds }}
+          periodSeconds: {{ default 20 .Values.fid.startupProbe.periodSeconds }}
+          failureThreshold: {{ default 15 .Values.fid.startupProbe.failureThreshold }}
+          successThreshold: {{ default 1 .Values.fid.startupProbe.successThreshold }}
+        envFrom:
+        - configMapRef:
+            name: {{ template "fid.fullname" . }}
+{{- if or .Values.envFromSecret (or .Values.envRenderSecret .Values.envFromSecrets) .Values.envFromConfigMaps }}
+      {{- if .Values.envFromSecret }}
+        - secretRef:
+            name: {{ tpl .Values.envFromSecret . }}
+      {{- end }}
+      {{- if .Values.envRenderSecret }}
+        - secretRef:
+            name: {{ include "fid.fullname" . }}-env
+      {{- end }}
+      {{- range .Values.envFromSecrets }}
+        - secretRef:
+            name: {{ tpl .name $ }}
+            optional: {{ .optional | default false }}
+      {{- end }}
+      {{- range .Values.envFromConfigMaps }}
+        - configMapRef:
+            name: {{ tpl .name $ }}
+            optional: {{ .optional | default false }}
+      {{- end }}
+{{- end }}
+        env:
+        {{- include "fid.auto_config.promotion.fid_env" . | nindent 8 -}}
+{{- if .Values.fid.mountSecrets }}
+{{- else }}
+  {{- if .Values.fid.rootUser }}
+        - name: FID_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: rootcreds-{{ template "fid.fullname" . }}
+              key: fid-root-username
+  {{- end }}
+  {{- if .Values.fid.rootPassword }}
+        - name: FID_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: rootcreds-{{ template "fid.fullname" . }}
+              key: fid-root-password
+  {{- end }}
+  {{- if .Values.zk.username }}
+        - name: ZK_USER
+          valueFrom:
+            secretKeyRef:
+              name: rootcreds-{{ template "fid.fullname" . }}
+              key: zk-username
+  {{- end }}
+  {{- if .Values.zk.password }}
+        - name: ZK_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: rootcreds-{{ template "fid.fullname" . }}
+              key: zk-password
+  {{- end }}
+  {{- if .Values.fid.license }}
+        - name: LICENSE
+          valueFrom:
+            secretKeyRef:
+              name: rootcreds-{{ template "fid.fullname" . }}
+              key: fid-license
+  {{- end }}
+{{- end }}
+{{- range $key, $value := .Values.env }}
+        - name: "{{ tpl $key $ }}"
+          value: "{{ tpl (print $value) $ }}"
+{{- end }}
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        volumeMounts:
+        - name: r1-pvc
+          mountPath: /opt/radiantone/vds
+        - name: migrations
+          mountPath: /migrations
+        - name: scripts
+          mountPath: /opt/radiantone/scripts
+{{- if .Values.fid.mountSecrets }}
+        - name: fid-creds
+          mountPath: /var/secrets
+{{- end }}
+{{- if .Values.extraVolumeMounts }}
+     {{- include "common.tplvalues.render" ( dict "value" .Values.extraVolumeMounts "context" $ ) | nindent 8 }}
+{{- end }}
+
+{{- if .Values.fid.readonly }}
+        command: ["/bin/sh", "-c", "export CLUSTER=join;./run.sh fg"]
+{{- else }}
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            #set -ex
+            if [ $HOSTNAME != {{ template "fid.fullname" . }}-0 ]; then
+              export CLUSTER=join;
+            fi;
+
+            #echo "Copying license"
+            #if [ -e "/var/secrets/fid-license" ] ; then
+            #  cp /var/secrets/fid-license /opt/radiantone/vds/vds_server/license.lic;
+            #fi;
+
+            # If license exists
+            if [ -e "/opt/radiantone/vds/vds_server/license.lic" ] ; then
+              # If license is mounted
+              if [ -e "/var/secrets/fid-license" ] ; then
+                LICENSE=$(cat /var/secrets/fid-license)
+                OLD_LICENSE=$(cat /opt/radiantone/vds/vds_server/license.lic)
+                # If license passed is different from old license
+                if [ "$LICENSE" != "$OLD_LICENSE" ] ;  then
+                  echo "License changed, updating it..."
+                  echo $LICENSE > /opt/radiantone/vds/vds_server/license.lic
+                fi
+              fi
+            fi
+
+            # Pre install script
+            {{- if (.Values.preInstall).enabled }}
+            ## if CURRENT_BUILDID="" it is a new install
+            if [ -e $RLI_HOME/.CURRENT_BUILDID ]; then
+                CURRENT_BUILDID=$(cat $RLI_HOME/.CURRENT_BUILDID)
+            fi;
+            if [ "$CURRENT_BUILDID" = "" ]; then
+              echo ">> Running pre install script"
+              {{- if .Values.preInstall.leaderOnly }}
+              if [ $HOSTNAME = {{ template "fid.fullname" . }}-0 ]; then
+                {{ .Values.preInstall.script | nindent 16 }}
+              fi;
+              {{- else }}
+                {{ .Values.preInstall.script | nindent 16 }}
+              {{- end }}
+            fi;
+            {{- end }}
+            # Pre start script
+            {{- if (.Values.preStart).enabled }}
+            echo ">> Running pre startup script"
+            {{- if .Values.preStart.leaderOnly }}
+            if [ $HOSTNAME = {{ template "fid.fullname" . }}-0 ]; then
+              {{ .Values.preStart.script | nindent 14 }}
+            fi;
+            {{- else }}
+              {{ .Values.preStart.script | nindent 14 }}
+            {{- end }}
+            {{- end }}
+
+            # Run the startup script
+            ./run.sh
+
+            # if the startup script is successful
+            if [ $? == 0 ]; then
+              # set the API key and service account on for 8.1-0 and above
+              {{- if semverCompare ">=8.1-0" (.Values.image.tag | default .Chart.AppVersion) }}
+              if [ $HOSTNAME = {{ template "fid.fullname" . }}-0 ]; then
+                if [ -e "/var/secrets/fid-admin-api-key" ] ; then
+                  FID_API_KEY=$(cat /var/secrets/fid-admin-api-key)
+                  # echo "Setting add-admin-api-key"
+                  /opt/radiantone/vds/bin/vdsconfig.sh add-admin-api-key -key "$FID_API_KEY" > /dev/null;
+                  # echo "Setting add-api-service-account"
+                  /opt/radiantone/vds/bin/vdsconfig.sh add-api-service-account -pwd "$FID_API_KEY" > /dev/null;
+                fi;
+                # set saas value
+                # echo "Setting saas value to {{ (.Values.global).eoc | default false }}"
+                /opt/radiantone/vds/bin/vdsconfig.sh set-property -name saas -value {{ (.Values.global).eoc | default false }} > /dev/null;
+              fi;
+              {{- end }}
+              # Post install script
+              {{- if .Values.postInstall.enabled }}
+              ## if CURRENT_BUILDID="" it is a new install
+              if [ -e $RLI_HOME/.CURRENT_BUILDID ]; then
+                  CURRENT_BUILDID=$(cat $RLI_HOME/.CURRENT_BUILDID)
+              fi;
+              if [ "$CURRENT_BUILDID" = "" ]; then
+                echo ">> Running post install script"
+                {{- if .Values.postInstall.leaderOnly }}
+                if [ $HOSTNAME = {{ template "fid.fullname" . }}-0 ]; then
+                  {{ .Values.postInstall.script | nindent 18 }}
+                fi;
+                {{- else }}
+                  {{ .Values.postInstall.script | nindent 18 }}
+                {{- end }}
+              fi;
+              {{- end }}
+              # Post start script
+              {{- if .Values.postStart.enabled }}
+              echo ">> Running post startup script"
+              {{- if .Values.postStart.leaderOnly }}
+              if [ $HOSTNAME = {{ template "fid.fullname" . }}-0 ]; then
+                {{ .Values.postStart.script | nindent 16 }}
+              fi;
+              {{- else }}
+                {{ .Values.postStart.script | nindent 16 }}
+              {{- end }}
+              {{- end }}
+              tail -f /dev/null
+            fi;
+{{- end }}
+{{- /* Get metrics and logging configurations */}}
+{{- $fluentdConfigType := include "fid.detectFluentdConfigType" . }}
+{{- $fluentdEnabled := false }}
+{{- $configFile := "/fluentd/etc/fluent.conf" }}
+{{- $pushMode := false }}
+{{- $pushGateway := "" }}
+{{- $pushMetricCron := "" }}
+{{- $image := "radiantone/fid-exporter:latest" }}
+{{- $imageTag := .Chart.AppVersion }}
+
+{{- if eq $fluentdConfigType "old" }}
+  {{- $fluentdEnabled = .Values.metrics.fluentd.enabled }}
+  {{- $configFile = .Values.metrics.fluentd.configFile | default "/fluentd/etc/fluent.conf" }}
+  {{- $pushMode = .Values.metrics.pushMode | default false }}
+  {{- $pushGateway = .Values.metrics.pushGateway | default "" }}
+  {{- $pushMetricCron = .Values.metrics.pushMetricCron | default "* * * * *" }}
+  {{- if .Values.metrics.fluentd.image }}
+    {{- $image = .Values.metrics.image }}
+    {{- $imageTag = .Values.metrics.imageTag }}
+  {{- end }}
+{{- else if eq $fluentdConfigType "new" }}
+  {{- $fluentdEnabled = .Values.logging.fluentd.enabled }}
+  {{- $configFile = .Values.logging.fluentd.configFile | default "/fluentd/etc/fluent.conf" }}
+  {{- $pushMode = .Values.metrics.pushMode | default false }}
+  {{- $pushGateway = .Values.metrics.pushGateway | default "" }}
+  {{- $pushMetricCron = .Values.metrics.pushMetricCron | default "* * * * *" }}
+  {{- if .Values.exporter.image }}
+    {{- $image = .Values.exporter.image }}
+    {{- $imageTag = .Values.exporter.imageTag }}
+  {{- end }}
+{{- end }}
+{{- if and (or .Values.metrics.enabled .Values.logging.enabled) $fluentdEnabled }}
+      - name: {{ .Chart.Name }}-exporter
+        image: "{{ .Values.exporter.image }}:{{ .Values.exporter.imageTag }}"
+        imagePullPolicy: Always
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        ports:
+        - containerPort: 9095
+          name: exporter
+        volumeMounts:
+        - name: r1-pvc
+          mountPath: /opt/radiantone/vds
+        {{- if $fluentdEnabled }}
+        - name: fluentd-config-volume
+          mountPath: /fluentd/etc
+        {{- end }}
+        {{- if .Values.securityContext.enabled }}
+        securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.securityContext "context" $) | nindent 12 }}
+        {{- end }}
+        command: ["/bin/sh", "-c", "until nc -w 2 -z localhost 2636; do echo Waiting for fid on port 2636; sleep 10; done; echo \"FID is up!\" && /fluentd/bin/entry.sh"]
+        env:
+        {{- if $pushMode }}
+        - name: PUSH_MODE
+          value: {{ $pushMode | quote }}
+        - name: PUSHGATEWAY_URI
+          value: {{ $pushGateway | quote }}
+        - name: PUSH_METRIC_CRON
+          value: {{ $pushMetricCron | quote }}
+        {{- end }}
+        - name: LDAP_URI
+          value: "ldaps://localhost:2636"
+        - name: JOB_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: {{ template "fid.fullname" . }}
+              key: ZK_CLUSTER
+        - name: BIND_DN
+        {{- if hasKey .Values.metrics "binddn" }}
+          value: {{ .Values.metrics.binddn | quote }}
+        {{- else }}
+          value: "uid=operator,ou=globalusers,cn=config"
+        {{- end }}
+        - name: BIND_PASSWORD
+        {{- if hasKey .Values.metrics "bindpassword" }}
+          value: {{ .Values.metrics.bindpassword | quote }}
+        {{- else }}
+          valueFrom:
+            secretKeyRef:
+              name: rootcreds-{{ template "fid.fullname" . }}
+              key: fid-root-password
+        {{- end }}
+        {{- if $fluentdEnabled }}
+        - name: FLUENTD_ENABLE
+          value: {{ $fluentdEnabled | quote }}
+        - name: FLUENTD_CONF
+          value: {{ $configFile | quote }}
+        - name: LABEL_APP
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['radiantlogic.io/app']
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        {{- end }}
+{{- end }}
+{{- if .Values.sidecars }}
+# Side cars
+      {{- include "common.tplvalues.render" ( dict "value" .Values.sidecars "context" $ ) | nindent 6 }}
+{{- end }}
+{{- if .Values.nodeSelector }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- else }}
+      {{- with .Values.global.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- if .Values.tolerations }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- else }}
+      {{- with .Values.global.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- if .Values.affinity }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- else }}
+      {{- with .Values.global.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+      volumes:
+      - name: scripts
+        emptyDir: {}
+{{- /* Advanced provider-specific volumes */}}
+{{- if and (hasKey .Values.fid "migration") (hasKey (.Values.fid.migration) "advanced") (.Values.fid.migration.advanced.enabled) }}
+  {{- $src := ( .Values.fid.migration.advanced.source | default dict ) -}}
+  {{- if and (eq (default "" $src.type) "git") (hasKey $src "git") (hasKey $src.git "auth") (hasKey $src.git.auth "sshKeySecretRef") (ne (default "" $src.git.auth.sshKeySecretRef.name) "") }}
+      - name: git-ssh-key
+        secret:
+          secretName: {{ $src.git.auth.sshKeySecretRef.name }}
+          items:
+            - key: {{ $src.git.auth.sshKeySecretRef.key | default "ssh-privatekey" }}
+              path: id_rsa
+  {{- end }}
+  {{- if and (eq (default "" $src.type) "git") (hasKey $src "git") (hasKey $src.git "auth") (hasKey $src.git.auth "knownHostsConfigMapRef") (ne (default "" $src.git.auth.knownHostsConfigMapRef.name) "") }}
+      - name: git-known-hosts
+        configMap:
+          name: {{ $src.git.auth.knownHostsConfigMapRef.name }}
+  {{- end }}
+  {{- if and (eq (default "" $src.type) "gcs") (hasKey $src "gcs") (hasKey $src.gcs "auth") (hasKey $src.gcs.auth "serviceAccountKeySecretRef") (ne (default "" $src.gcs.auth.serviceAccountKeySecretRef.name) "") }}
+      - name: gcp-sa-key
+        secret:
+          secretName: {{ $src.gcs.auth.serviceAccountKeySecretRef.name }}
+  {{- end }}
+{{- end }}
+{{- if (.Values.fid.migration).file }}
+      - name: migrations
+        configMap:
+          name: {{ template "fid.fullname" . }}-migration
+{{- else }}
+      - name: migrations
+        emptyDir: {}
+{{- end }}
+{{- if .Values.fid.mountSecrets }}
+      - name: fid-creds
+        secret:
+          defaultMode: 288
+          secretName: rootcreds-{{ template "fid.fullname" . }}
+{{- end }}
+{{- if $fluentdEnabled }}
+      - name: fluentd-config-volume
+        configMap:
+          name: fluentd-config
+{{- end }}
+{{- if .Values.extraVolumes }}
+     {{- include "common.tplvalues.render" ( dict "value" .Values.extraVolumes "context" $ ) | nindent 6 }}
+{{- end }}
+  {{- with .Values.extraContainerVolumes }}
+  {{- tpl (toYaml .) $ | nindent 8 }}
+  {{- end }}
+{{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+  - apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: r1-pvc
+      annotations:
+      {{- range $key, $value := .Values.persistence.annotations }}
+        {{ $key }}: {{ $value }}
+      {{- end }}
+      labels:
+        {{- include "fid.selectorLabels" . | nindent 8 }}
+    spec:
+      accessModes:
+      {{- range .Values.persistence.accessModes }}
+      - {{ . | quote }}
+      {{- end }}
+      resources:
+        requests:
+          storage: {{ .Values.persistence.size | quote }}
+      {{- if .Values.persistence.storageClass }}
+      {{- if (eq "-" .Values.persistence.storageClass) }}
+      storageClassName: ""
+      {{- else }}
+      storageClassName: "{{ .Values.persistence.storageClass }}"
+      {{- end }}
+      {{- end }}
+{{- else }}
+      - name: r1-pvc
+        emptyDir: {}
+{{- end }}

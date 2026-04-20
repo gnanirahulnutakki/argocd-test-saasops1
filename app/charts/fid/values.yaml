@@ -1,0 +1,2271 @@
+# Global Configuration
+# ===================
+# This section defines settings that affect all components across the entire deployment.
+# These settings cascade down to all containers and services unless explicitly overridden.
+#
+# Key Features:
+# - Enterprise Operational Control (EOC) mode management
+# - Global environment variable configuration
+# - Platform-specific compatibility settings
+# - OpenShift adaptation support
+#
+# Usage Impact:
+# - EOC mode should be enabled only for saas
+# - Environment variables are injected into all pods
+# - Platform compatibility affects security context rendering
+
+global:
+  # Controls Environment Operational Centre, control mode across services
+  # When true, enables enterprise-specific features and behaviors
+  eoc: true
+
+  # Global environment variables passed to all deployment pods
+  # Example:
+  #   AWS_REGION: us-east-1
+  env: {}
+
+  # Platform-specific adaptations, particularly for OpenShift
+  # Modifies security contexts to work with restricted SCCs
+  compatibility:
+    openshift:
+      # Values: auto, force, disabled (or empty)
+      # auto: Automatically detect and adapt
+      # force: Always apply OpenShift adaptations
+      # disabled: No platform-specific changes
+      adaptSecurityContext: auto
+
+  # Hibernate the application
+  # Scales down pods to zero if set to true
+  # Default is false
+  hibernate: false
+
+  # Affect on Deployment:
+  # Influences pod placement, which can affect performance and resource utilization.
+  nodeSelector: {}
+
+  # Tolerations allow the scheduler to schedule pods with matching taints.
+  tolerations: []
+
+  # Node affinity is conceptually similar to nodeSelector, allowing you to constrain which nodes your Pod can be scheduled on based on node labels.
+  affinity: {}
+
+# Alternate Name Configuration
+# ============================
+# Allows the specification of an alternate name for the application.
+# This can be useful for branding or multi-tenancy purposes.
+alternateName: ""
+
+# Replica Count Configuration
+# ==========================
+# Controls the number of pod replicas in the FID StatefulSet.
+# This setting directly impacts high availability and scaling.
+#
+# Important Considerations:
+# - More replicas increase availability but consume more resources
+# - Odd number recommended for better consensus in distributed operations
+# - Each replica requires its own persistent storage
+# - License may limit maximum replicas
+
+replicaCount: 1
+
+# Image Configuration
+# ==================
+# Defines the container image settings for the FID deployment.
+# Critical for determining which version of the application runs.
+#
+# Configuration Impact:
+# - Repository changes affect image pull behavior
+# - Tag determines application version
+# - PullPolicy affects update behavior and resource usage
+#
+# Security Note:
+# - Use specific tags in production, avoid 'latest'
+# - Consider using image pull secrets for private registries
+# - Verify image authenticity in production environments
+
+image:
+  # Docker image repository location
+  repository: radiantone/fid-nightly
+
+  # Image pull policy
+  # Always: Always pull image
+  # IfNotPresent: Use cached image if available
+  # Never: Only use local images
+  pullPolicy: Always
+
+  # Image tag (version)
+  # Defaults to chart appVersion if empty
+  # Recommendation: Always specify in production
+  tag: ""
+
+# FID Core Configuration
+# =====================
+# Core settings for the FID server deployment.
+# These settings fundamentally define how the FID server operates.
+#
+# Critical Aspects:
+# - Authentication credentials
+# - Licensing
+# - Cluster behavior
+# - Migration handling
+# - API access
+# - Health monitoring
+#
+# Security Notes:
+# - Protect root credentials
+# - Secure API keys
+# - Consider using external secrets management
+
+fid:
+  # Admin user name
+  # Default: cn=Directory Manager
+  # Used for initial login
+  rootUser: "cn=Directory Manager"
+
+  # Root user password
+  # Consider using external secrets management
+  rootPassword: "Welcome1234"
+
+  # FID license key
+  # Required for production use
+  license:
+
+  # Cluster detachment behavior
+  # When true, node gracefully leaves cluster on shutdown
+  # Note: Do not use in production
+  detach: false
+
+  # Read-only mode
+  # When true, new IDDM node, joins cluster in read-only mode
+  readonly: false
+
+  # ========================================
+  # MIGRATION CONFIGURATION
+  # ========================================
+  migration:
+    # Migration file that will be imported during first install (export.zip)
+    # url: https://raw.githubusercontent.com/radiantlogic-devops/docker-compose/master/05-monitoring-stack/configs/fid/export.zip
+    url:
+    # Post migration script to be run after install (configure_fid.sh)
+    script:
+
+    # Advanced migration configuration
+    # Precedence rule:
+    # - When advanced.enabled: true, ONLY the advanced block is used. Legacy fields (url/file/script) are ignored.
+    # - When advanced.enabled: false or unset, ONLY legacy fields (url/file/script) are used.
+    advanced:
+      enabled: false
+      # Source selector and provider-specific settings
+      source:
+        # One of: http | s3 | gcs | azure | git | db
+        type: ""
+        http:
+          url: ""
+          # extra curl flags, e.g. "-L"
+          flags: ""
+          # Optional future fields (not all wired initially):
+          headers: []
+        s3:
+          bucket: ""
+          key: ""
+          region: ""
+          endpoint: ""   # for S3-compatible stores (optional)
+          auth:
+            # If true, rely on ambient credentials (IRSA/instance role), ignore static keys
+            irsa: true
+            accessKeyIdSecretRef: {name: "", key: ""}
+            secretAccessKeySecretRef: {name: "", key: ""}
+            sessionTokenSecretRef: {name: "", key: ""}
+        gcs:
+          bucket: ""
+          object: ""
+          auth:
+            # If true, rely on Workload Identity/Application Default Credentials
+            workloadIdentity: true
+            # If provided, mount this service account JSON and set GOOGLE_APPLICATION_CREDENTIALS
+            serviceAccountKeySecretRef: {name: "", key: ""}
+        azure:
+          accountName: ""
+          container: ""
+          blob: ""
+          auth:
+            managedIdentity: true
+            accountKeySecretRef: {name: "", key: ""}
+            sasTokenSecretRef: {name: "", key: ""}
+        git:
+          repo: ""   # e.g., git@github.com:org/private.git or https://github.com/org/private.git
+          ref: "main"
+          path: "export.zip"
+          auth:
+            # For SSH auth (preferred):
+            sshKeySecretRef: {name: "", key: "ssh-privatekey"}
+            knownHostsConfigMapRef: {name: "", key: "known_hosts"}
+            # HTTPS auth (optional):
+            usernameSecretRef: {name: "", key: "username"}
+            passwordSecretRef: {name: "", key: "password"}
+            tokenSecretRef: {name: "", key: "token"}
+        db:
+          # Minimal DB support (optional): postgres or mysql
+          driver: ""   # postgres | mysql
+          host: ""
+          port: 0
+          database: ""
+          userSecretRef: {name: "", key: ""}
+          passwordSecretRef: {name: "", key: ""}
+          query: ""              # returns the export.zip bytes; base64 is recommended
+          outputEncoding: "raw"   # raw | base64
+      # Optional: fetch a post-migration script over HTTP when advanced.enabled (HTTP only for now)
+      script:
+        url: ""
+        flags: ""
+
+      # Images used per provider (override if you need pinning)
+      image:
+        http: "alpine/curl:latest"
+        s3: "amazon/aws-cli:2.15.40"
+        gcs: "gcr.io/google.com/cloudsdktool/google-cloud-cli:slim"
+        azure: "mcr.microsoft.com/azure-storage/azcopy:10.24.0"
+        git: "bitnami/git:latest"
+        db_postgres: "postgres:16-alpine"
+        db_mysql: "mysql:8.3"
+        pullPolicy: IfNotPresent
+
+  # Secret mounting configuration
+  # Requires FID 8.0.0+
+  # True: Mount secrets as files
+  # False: Use environment variables
+  mountSecrets: true
+
+  # Sealed Secrets integration
+  sealedSecrets: false
+
+  # Admin API key for programmatic access
+  adminApiKey:
+
+  ## Deploy a readonly/follower-only sts, that joins current FID cluster
+  ##
+  followerOnly:
+    enabled: false
+    # Enable this with caution
+    autoscaling:
+      enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 80
+    targetMemoryUtilizationPercentage: 80
+    ## Detach from cluster on termination
+    detach: true
+  livenessProbe:
+    initialDelaySeconds: 10
+    timeoutSeconds: 5
+  readinessProbe:
+    initialDelaySeconds: 10
+    timeoutSeconds: 5
+  # see https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/#configure-probes
+  startupProbe:
+    initialDelaySeconds: 0
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 15
+
+# ZooKeeper Configuration
+# =======================
+# Configuration for ZooKeeper connectivity, essential for cluster coordination.
+# ZooKeeper manages distributed synchronization for the FID cluster.
+#
+# Key Aspects:
+# - Cluster coordination
+# - Configuration management
+# - Leader election
+# - Distributed locking
+#
+# Operational Impact:
+# - Critical for multi-node deployments
+# - Affects cluster stability
+# - Influences failover behavior
+
+zk:
+  # Use external ZooKeeper instead of embedded
+  # Recommended for production environments
+  external: true
+
+  # ZooKeeper connection string
+  # Format: host:port
+  connectionString: "zookeeper-app:2181"
+
+  # Unique cluster identifier
+  # Used to isolate multiple FID clusters
+  clusterName: "fid-cluster"
+
+  # Health check endpoint
+  # Used to verify ZooKeeper status
+  ruok: "http://zookeeper-app:8080/commands/ruok"
+
+  # Authentication credentials
+  # Optional but recommended for security
+  userName: "admin"
+  password: "secret1234"
+
+# Sysctl Configuration
+# ===================
+# Kernel parameter settings via sysctl.
+# Modifies system settings for optimal performance.
+#
+# Security Note:
+# - Requires privileged access
+# - Use with caution in production
+# - Validate changes with security team
+
+sysctl:
+  enabled: false
+
+# Image Credentials Configuration
+# ==============================
+# Manages authentication for container registry access.
+# Essential for pulling images from private registries.
+#
+# Security Considerations:
+# - Protect registry credentials
+# - Use minimal-privilege accounts
+# - Regular credential rotation
+# - Consider using external secrets
+
+imagePullSecrets: []
+# imagePullSecrets:
+# - name: regcred
+
+# Image Credentials
+imageCredentials:
+  enabled: false
+  registry: docker.io
+  username:
+  password:
+  email:
+
+# Name Overrides
+# =============
+# Controls resource naming in Kubernetes.
+# Affects how resources are identified and referenced.
+#
+# Usage:
+# - nameOverride: Partial name replacement
+# - fullnameOverride: Complete name replacement
+# - Affects service discovery and references
+
+nameOverride: ""
+fullnameOverride: "fid"
+
+# Service Account Configuration
+# ===========================
+# Kubernetes service account settings.
+# Controls pod permissions and access to cluster resources.
+#
+# Security Impact:
+# - Affects pod permissions
+# - Controls API access
+# - RBAC integration point
+
+serviceAccount:
+  # Create dedicated service account
+  create: false
+
+  # Additional annotations
+  annotations: {}
+
+  # Custom name override
+  # Default: Generated using fullname template
+  name: ""
+
+# Update Strategy
+# ==============
+# Controls how pod updates are performed
+updateStrategy: RollingUpdate
+
+# Pod Annotations
+# =============
+# Custom metadata for pods
+podAnnotations: {}
+
+# Pod Labels
+# =============
+# Custom metadata for pods
+podLabels: {}
+
+# Security Contexts
+# ===============
+# Security settings for pods and containers.
+# Critical for security posture and compliance.
+
+# Pod Security Context
+# --------------------
+# Defines security settings for the entire pod.
+# In `statefulset.yaml`, applied to `securityContext` in the pod spec if `enabled` is true.
+#
+# Fields:
+# - `fsGroup`: Group ID for mounted volumes.
+# - `privileged`: If true, the pod has elevated privileges.
+#
+# Affect on Deployment:
+# Security contexts affect permissions and capabilities.
+# Misconfiguration can lead to security risks or permission issues.
+podSecurityContext:
+  enabled: true
+  fsGroup: 1000
+
+# Container Security Context
+# --------------------------
+# Defines security settings for individual containers.
+# In `statefulset.yaml`, applied to `securityContext` in the container spec if `enabled` is true.
+#
+# Affect on Deployment:
+# Enhances security by restricting container permissions.
+# Example: Running as non-root user.
+securityContext:
+  enabled: true
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+# Service Configuration
+# ---------------------
+# Configures the Kubernetes Service for the FID application.
+# In `statefulset.yaml`, service definitions use these settings.
+#
+# Affect on Deployment:
+# Determines how the service is exposed within the cluster.
+
+service:
+  # Service type (ClusterIP, NodePort, LoadBalancer)
+  type: ClusterIP
+  # Port exposed by the service
+  port: 7070
+  # Annotations for fid-ext service
+  annotations: {}
+  # Annotations for fid-app service
+  app:
+    annotations: {}
+  # Annotations for fid-admin service
+  admin:
+    annotations: {}
+
+ingress:
+  enabled: false
+  annotations: {}
+  # annotations:
+    # kubernetes.io/ingress.class: nginx
+    # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: chart-example.local
+      paths:
+        - "/"
+  tls: []
+  #  - secretName: chart-example-tls
+  #    hosts:
+  #      - chart-example.local
+
+# Resource Management
+# ------------------
+# This section defines container resource allocation and limits.
+# Key Features:
+# - `limits`: Maximum resource constraints for CPU and memory
+# - `requests`: Guaranteed resource allocations
+# - CPU units in cores or millicores (e.g., 1 = 1 core, 500m = 0.5 cores)
+# - Memory units in bytes (e.g., 2Gi = 2 Gigabytes)
+# Note: Properly tune these values based on workload requirements and cluster capacity.
+# resources: {}
+  # We usually recommend not to specify default resources and to leave this as a conscious
+  # choice for the user. This also increases chances charts run on environments with little
+  # resources, such as Minikube. If you do want to specify resources, uncomment the following
+  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
+  # limits:
+  #   cpu: 100m
+  #   memory: 128Mi
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+# resources:
+#  limits:
+#    cpu: 4
+#    memory: 8Gi
+#  requests:
+#    cpu: 2
+#    memory: 2Gi
+
+resources:
+  limits:
+    cpu: 1
+    memory: 2Gi
+  requests:
+    cpu: 500m
+    memory: 1Gi
+
+# ##############################
+# #### Do not enable this ######
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+# ###############################
+
+# Node Scheduling Configuration
+# -----------------------------
+# Controls where pods are scheduled in the cluster.
+# In `statefulset.yaml`, these settings are applied to the pod spec.
+#
+# Fields:
+# - `nodeSelector`: Assign pods to nodes with matching labels.
+# - `tolerations`: Allow pods to be scheduled on nodes with matching taints.
+# - `affinity`: Advanced node selection rules.
+#
+# Affect on Deployment:
+# Influences pod placement, which can affect performance and resource utilization.
+
+nodeSelector: {}
+  # tenantname:
+
+# Tolerations allow the scheduler to schedule pods with matching taints.
+
+tolerations: []
+
+# Node affinity is conceptually similar to nodeSelector, allowing you to constrain which nodes your Pod can be scheduled on based on node labels.
+affinity: {}
+## Enable persistence using Persistent Volume Claims
+## ref: http://kubernetes.io/docs/user-guide/persistent-volumes/
+##
+
+# Persistence Configuration
+# ========================
+# Manages persistent storage configuration for stateful data.
+# Critical for maintaining data across pod restarts and migrations.
+#
+# Storage Considerations:
+# 1. Performance: Storage class affects I/O performance
+# 2. Availability: Access modes determine pod scheduling
+# 3. Capacity: Size must accommodate data growth
+# 4. Backup: Annotations can trigger backup solutions
+#
+# Operational Impact:
+# - Storage class affects provisioning speed
+# - Access modes influence high availability options
+# - Size changes require manual intervention
+# - Annotations can integrate with backup systems
+
+persistence:
+  enabled: false
+  ## If defined, storageClassName: <storageClass>
+  ## If set to "-", storageClassName: "", which disables dynamic provisioning
+  ## If undefined (the default) or set to null, no storageClassName spec is
+  ##   set, choosing the default provisioner.  (gp2 on AWS, azure-disk on
+  ##   Azure, standard on GKE, AWS & OpenStack)
+  ##
+  # storageClass: "-"
+  storageClass: "default"
+  accessModes:
+  - ReadWriteOnce
+  size: 10Gi
+  annotations: {}
+
+# ------------------------------------------------------------------------------------------------------
+# The "metrics:" section is deprecated from helm-v8 helm charts version 1.1.2, please use LOGGING & METRICS Configuration:
+# metrics:
+#   enabled: false
+#   image: radiantone/fid-exporter
+#   imageTag: latest
+#   securityContext:
+#     enabled: false
+#     runAsUser: 0
+#   annotations: {}
+#   pushMode: false
+#   pushGateway: http://prometheus-server:9091
+#   pushMetricCron: "* * * * *"
+#   fluentd:
+#     enabled: false
+#     logs: {}
+#     # Aggregator Configurations
+#     aggregators: []
+# ------------------------------------------------------------------------------------------------------
+
+# Logging & Metrics Configuration
+# ==============================
+# This section manages comprehensive logging and monitoring capabilities for the FID deployment.
+# It integrates both Fluentd for log aggregation and Prometheus metrics collection.
+#
+# Key Components:
+# 1. Log Collection: Captures logs from various FID components
+# 2. Metrics Export: Prometheus metrics for monitoring
+# 3. Aggregator Integration: Supports multiple log destinations
+# 4. Index Management: Automatic log rotation and cleanup
+# 5. Retention Policies: Configurable retention periods
+#
+# Integration Points:
+# - Elasticsearch/OpenSearch for log storage
+# - Prometheus for metrics collection
+# - Grafana for visualization
+# - Curator for index lifecycle management
+#
+# Security Considerations:
+# - Authentication for log aggregators
+# - SSL/TLS encryption for log transport
+# - Access control for metrics
+# - Sensitive data filtering
+
+# Metrics Exporter Configuration
+exporter:
+  image: "radiantone/fid-exporter"
+  # imageTag: "dev-1.0.4"
+  imageTag: secure
+  securityContext:
+    enabled: true
+    runAsUser: 0
+  annotations: {}
+  # Probe Configurations
+  livenessProbe:
+    initialDelaySeconds: 60
+    timeoutSeconds: 5
+  readinessProbe:
+    initialDelaySeconds: 120
+    timeoutSeconds: 5
+
+metrics:
+  enabled: false
+  image: "radiantone/script_exporter"
+  tag: "v2.24.3"
+  pushMode: false
+  pushGateway: http://prometheus-pushgateway.common-services.svc.cluster.local:9091
+  pushMetricCron: "* * * * *"
+  # binddn:
+  # bindpassword:
+
+# Logging Configuration
+# ===================
+# Comprehensive logging setup using Fluentd and optional Fluent Bit.
+# Supports multiple log sources and destinations with flexible routing.
+#
+# Major Features:
+# - Multiple log source support
+# - Various output aggregators
+# - Configurable retention policies
+# - Log parsing and transformation
+# - Buffer management
+# - SSL/TLS support
+#
+# The logging section supports detailed configuration of:
+# 1. Log sources (VDS server, connectors, events, etc.)
+# 2. Output destinations (Elasticsearch, Splunk, etc.)
+# 3. Retention policies per log type
+# 4. Custom parsing rules
+# 5. Buffer settings
+# 6. Security configurations
+
+logging:
+  enabled: false
+  annotations:
+    enabled: false
+    config: {}
+    # config:
+    #   retention-policy: 7d
+
+  # fluent-bit:
+  #   enabled: false
+  # Automatically creates index patterns in Kibana when enabled
+  indexCreation:
+    enabled: false
+    rbac:
+      enabled: false
+    kibana:
+      scheme: "http"
+      host: "kibana.mycompany.local"
+      port: "5601"
+      # user: "custom-user"
+      # password: "custom-pass"
+  fluentd:
+    enabled: false
+    posFileDirectory: "/opt/radiantone/vds/work/logging"
+    configFile: /fluentd/etc/fluent.conf
+    # Log Sources Configuration
+    logs:
+      # Connector Logs (with dynamic path handling)
+      connector:
+        enabled: true
+        path: "/opt/radiantone/vds/logs/sync_agents/*/connector.log"
+        index: connector.log
+        # custom_index: "sync_agents.${tag_parts[1]}.connector"
+        aggregators: ["default"]
+        retention_days: 30
+      # VDS Server Logs
+      vds_server:
+        enabled: true
+        path: "/opt/radiantone/vds/vds_server/logs/vds_server.log"
+        index: vds_server.log
+        retention_days: 30
+        aggregators: ["default"]  # Default aggregator
+        # shards: 1  #  Set shards to be allocated for each index, Optional, defaults to 1
+        # replicas: 1  #  Optional, no of replicas each index can have, defaults to 1
+        # refresh_interval: "5s"  #  Default is 5s, can be modified, Optional, defaults to 5s
+        # custom_index: custom_vds_server       # Optional: Custom index name
+        # splunk_index: vds_splunk              # Optional: Splunk-specific index
+        # splunk_source: vds_source             # Optional: Splunk source
+        # splunk_sourcetype: vds_sourcetype     # Optional: Splunk sourcetype
+      # VDS Server Access Logs
+      vds_server_access:
+        enabled: true
+        path: "/opt/radiantone/vds/vds_server/logs/vds_server_access.csv"
+        index: vds_server_access.log
+        retention_days: 30
+        aggregators: ["default"]
+        parse: |-
+          <parse>
+            @type tsv
+            keys LOGID,LOGDATE,LOGTIME,LOGTYPE,SERVERID,SERVERPORT,SESSIONID,MSGID,CLIENTIP,BINDDN,BINDUSER,CONNNB,OPNB,OPCODE,OPNAME,BASEDN,ATTRIBUTES,SCOPE,FILTER,SIZELIMIT,TIMELIMIT,LDAPCONTROLS,CHANGES,RESULTCODE,ERRORMESSAGE,MATCHEDDN,NBENTRIES,ETIME
+            types LOGID:integer,LOGDATE:string,LOGTIME:string,LOGTYPE:integer,SERVERID:string,SERVERPORT:integer,SESSIONID:integer,MSGID:integer,CLIENTIP:string,BINDDN:string,BINDUSER:string,CONNNB:integer,OPNB:integer,OPCODE:integer,OPNAME:string,BASEDN:string,ATTRIBUTES:string,SCOPE:string,FILTER:string,SIZELIMIT:integer,TIMELIMIT:integer,LDAPCONTROLS:string,CHANGES:string,RESULTCODE:integer,ERRORMESSAGE:string,MATCHEDDN:string,NBENTRIES:integer,ETIME:integer
+          </parse>
+      vds_events:
+        enabled: true
+        path: "/opt/radiantone/vds/vds_server/logs/vds_events.log"
+        index: vds_events.log
+        retention_days: 30
+        aggregators: ["default"]
+        # custom_index:
+        # splunk_index:
+        # splunk_source:
+        # splunk_sourcetype:
+      periodiccache:
+        enabled: true
+        path: "/opt/radiantone/vds/vds_server/logs/periodiccache.log"
+        index: periodiccache.log
+        retention_days: 30
+        aggregators: ["default"]
+        # custom_index:
+        # splunk_index:
+        # splunk_source
+        # splunk_sourcetype
+      web:
+        enabled: true
+        path: "/opt/radiantone/vds/vds_server/logs/jetty/web.log"
+        index: web.log
+        retention_days: 30
+        aggregators: ["default"]
+        # custom_index:
+        # splunk_index:
+        # splunk_source
+        # splunk_sourcetype
+      web_access:
+        enabled: true
+        path: "/opt/radiantone/vds/vds_server/logs/jetty/web_access.log"
+        index: web_access.log
+        retention_days: 30
+        aggregators: ["default"]
+        # custom_index:
+        # splunk_index:
+        # splunk_source
+        # splunk_sourcetype
+      sync_engine:
+        enabled: true
+        path: "/opt/radiantone/vds/vds_server/logs/sync_engine/sync_engine.log"
+        index: sync_engine.log
+        retention_days: 30
+        aggregators: ["default"]
+        # custom_index:
+        # splunk_index:
+        # splunk_source
+        # splunk_sourcetype
+      alerts:
+        enabled: true
+        path: "/opt/radiantone/vds/logs/alerts.log"
+        index: alerts.log
+        retention_days: 30
+        aggregators: ["default"]
+        # custom_index:
+        # splunk_index:
+        # splunk_source
+        # splunk_sourcetype
+      adap_access:
+        enabled: true
+        path: "/opt/radiantone/vds/vds_server/logs/adap_access.log"
+        index: adap_access.log
+        retention_days: 30
+        aggregators: ["default"]
+        # custom_index:
+        # splunk_index:
+        # splunk_source
+        # splunk_sourcetype
+      admin_rest_api_access:
+        enabled: true
+        path: "/opt/radiantone/vds/vds_server/logs/admin_rest_api_access.log"
+        index: admin_rest_api_access.log
+        retention_days: 30
+        aggregators: ["default"]
+        # custom_index:
+        # splunk_index:
+        # splunk_source
+        # splunk_sourcetype
+    # Aggregator Configurations
+    # IMPORTANT: Elasticsearch/OpenSearch support BOTH flat and nested SSL parameters
+    # for compatibility with EOC and other management systems
+    aggregators:
+
+      #  Default Elasticsearch aggregator
+      - name: "default"  #  required unique aggregator name
+        type: "elasticsearch"  #  required aggregator type
+        host: "elasticsearch-master.common-services.svc.cluster.local"  #  required
+        port: "9200"  #  required
+
+        # scheme: "https"  #  optional
+        # user: "elastic"  #  optional
+        # password: "changeme"  #  optional
+        # path: ""  #  optional
+        # logstash_format: true  #  optional
+        # logstash_prefix: "myapp"  #  optional
+        # reconnect_on_error: true  #  optional
+        # time_key: "@timestamp"  #  optional
+        # include_timestamp: false  #  optional
+
+        # buffer:  #  optional (nested configuration works)
+        #   chunk_limit_size: "2M"  #  optional
+        #   flush_interval: "5s"  #  optional
+        #   retry_type: "exponential_backoff"  #  optional
+        #   path: "/var/log/fluentd-buffers/es.buffer"  #  optional
+
+        # SSL/TLS configuration - BOTH formats supported:
+        # Option 1: Nested SSL (EOC compatible)
+        # ssl:  #  optional
+        #   enabled: true  #  optional
+        #   verify: false  #  optional
+        #   ca_path: "/path/to/ca.pem"  #  optional
+        #   cert_path: "/path/to/client-cert.pem"  #  optional
+        #   key_path: "/path/to/client-key.pem"  #  optional
+        #   key_passphrase: "secret"  #  optional
+
+        # Option 2: Flat SSL parameters (also supported)
+        # ssl_verify: false  #  optional
+        # ca_file: "/path/to/ca.pem"  #  optional
+        # client_cert: "/path/to/client-cert.pem"  #  optional
+        # client_key: "/path/to/client-key.pem"  #  optional
+        # client_key_pass: "secret"  #  optional
+
+      #  Example: Advanced Elasticsearch aggregator with full SSL
+      # - name: "elasticsearch-prod"  #  required
+      #   type: "elasticsearch"  #  required
+      #   host: "elasticsearch-prod.svc.cluster.local"  #  required
+      #   port: "9200"  #  required
+      #   scheme: "https"  #  optional
+      #   user: "elastic"  #  optional
+      #   password: "changeme"  #  optional
+      #   path: "/var/log/fluentd-buffers/es-primary"  #  optional
+      #   logstash_format: true  #  optional
+      #   logstash_prefix: "fid-prod"  #  optional
+      #   reconnect_on_error: true  #  optional
+      #   time_key: "@timestamp"  #  optional
+      #   include_timestamp: true  #  optional
+      #   buffer:  #  optional
+      #     chunk_limit_size: "20M"  #  optional
+      #     flush_interval: "10s"  #  optional
+      #     retry_type: "exponential_backoff"  #  optional
+      #     retry_max_interval: "30s"  #  optional
+      #     total_limit_size: "512M"  #  optional
+      #   ssl:  #  optional (nested format - EOC compatible)
+      #     enabled: true  #  optional
+      #     verify: true  #  optional
+      #     ca_path: "/certs/elasticsearch-ca.pem"  #  optional
+      #     cert_path: "/certs/elasticsearch-client.pem"  #  optional
+      #     key_path: "/certs/elasticsearch-client-key.pem"  #  optional
+      #     key_passphrase: "password"  #  optional
+
+      #  Example: OpenSearch aggregator (supports same SSL options as Elasticsearch)
+      # - name: "opensearch-prod"  #  required
+      #   type: "opensearch"  #  required
+      #   host: "opensearch-cluster-master.svc.cluster.local"  #  required
+      #   port: "9200"  #  required
+      #   scheme: "https"  #  optional
+      #   user: "admin"  #  optional
+      #   password: "admin"  #  optional
+      #   index_name: "myindex"  #  optional
+      #   template_name: "mytemplate"  #  optional
+      #   template_file: "/path/to/template.json"  #  optional
+      #   template_overwrite: true  #  optional
+      #   customize_template: true  #  optional
+      #   compression_level: 9  #  optional
+      #   reconnect_on_error: true  #  optional
+      #   time_key: "@timestamp"  #  optional
+      #   include_timestamp: false  #  optional
+      #   buffer:  #  optional
+      #     chunk_limit_size: "2M"  #  optional
+      #     flush_interval: "5s"  #  optional
+      #   ssl:  #  optional (nested format - EOC compatible)
+      #     enabled: true  #  optional
+      #     verify: true  #  optional
+      #     ca_path: "/certs/opensearch-ca.pem"  #  optional
+      #     cert_path: "/certs/opensearch-client.pem"  #  optional
+      #     key_path: "/certs/opensearch-client-key.pem"  #  optional
+      #     key_passphrase: "password"  #  optional
+
+      #  Example: Splunk HEC aggregator with fields
+      # - name: "splunk-prod"  #  required
+      #   type: "splunk_hec"  #  required
+      #   hec_host: "splunk-service.svc.cluster.local"  #  required
+      #   hec_port: "8088"  #  required
+      #   hec_token: "YOUR-HEC-TOKEN"  #  required
+      #   protocol: "https"  #  optional
+      #   insecure_ssl: false  #  optional
+      #   index: "myindex"  #  optional
+      #   source: "kubernetes:fid"  #  optional
+      #   sourcetype: "_json"  #  optional
+      #   source_key: "source_field"  #  optional
+      #   sourcetype_key: "stype_field"  #  optional
+      #   metrics_from_event: false  #  optional
+      #   use_ack: true  #  optional
+      #   # SSL certificates (flat parameters for Splunk)
+      #   ca_file: "/certs/splunk-ca-bundle.pem"  #  optional
+      #   client_cert: "/certs/splunk-client.pem"  #  optional
+      #   client_key: "/certs/splunk-client-key.pem"  #  optional
+      #   buffer:  #  optional
+      #     chunk_limit_size: "10M"  #  optional
+      #     flush_interval: "5s"  #  optional
+      #   ssl:  #  optional (verification can use nested)
+      #     enabled: true  #  optional
+      #     verify: true  #  optional
+      #   fields:  #  optional - custom metadata fields
+      #     environment: "production"  #  optional
+      #     datacenter: "us-east-1"  #  optional
+      #     application: "fid"  #  optional
+      #     compliance_scope: "pci-sox"  #  optional
+
+      #  Example: Loki aggregator with labels
+      # - name: "loki-prod"  #  required
+      #   type: "loki"  #  required
+      #   url: "https://loki.monitoring.prod.internal:3100"  #  required
+      #   username: "fid-service"  #  optional
+      #   password: "LOKI_PASSWORD"  #  optional
+      #   tenant: "identity-platform"  #  optional
+      #   extraLabels:  #  optional
+      #     environment: "production"  #  optional
+      #     app: "fid"  #  optional
+      #     datacenter: "us-east-1"  #  optional
+      #   drop_single_key: true  #  optional
+      #   remove_keys: "kubernetes.labels.pod-template-hash"  #  optional
+      #   line_format: "json"  #  optional
+      #   buffer:  #  optional
+      #     chunk_limit_size: "2M"  #  optional
+      #     flush_interval: "2s"  #  optional
+      #   ssl:  #  optional (nested format supported)
+      #     enabled: true  #  optional
+      #     verify: true  #  optional
+      #     ca_path: "/certs/loki-ca-bundle.pem"  #  optional
+
+      #  Example: Sumologic aggregator with compression
+      # - name: "sumo-prod"  #  required
+      #   type: "sumologic"  #  required
+      #   endpoint: "https://collectors.us2.sumologic.com/receiver/v1/http/COLLECTOR_ID"  #  required
+      #   verify_ssl: true  #  optional
+      #   source_category: "prod/kubernetes/fid/logs"  #  optional
+      #   log_key: "message"  #  optional
+      #   add_timestamp: true  #  optional
+      #   compress: true  #  optional
+      #   compress_encoding: "gzip"  #  optional
+      #   proxy_uri: "http://proxy.example.com:8080"  #  optional
+      #   disable_cookies: true  #  optional
+      #   buffer:  #  optional
+      #     chunk_limit_size: "10M"  #  optional
+      #     flush_interval: "5s"  #  optional
+      #   ssl:  #  optional (nested format supported)
+      #     enabled: true  #  optional
+      #     verify: true  #  optional
+      #     ca_path: "/certs/sumologic-ca.pem"  #  optional
+
+      #  Example: S3 aggregator with IAM role
+      # - name: "s3-archive"  #  required
+      #   type: "s3"  #  required
+      #   bucket: "fid-logs-archive"  #  required
+      #   region: "us-west-2"  #  required
+      #   # Option 1: Use AWS keys
+      #   # aws_key_id: "AKIAIOSFODNN7EXAMPLE"  #  optional
+      #   # aws_sec_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"  #  optional
+      #   # Option 2: Use IAM role (recommended)
+      #   assume_role_credentials: true  #  optional
+      #   role_arn: "arn:aws:iam::123456789012:role/FIDLogWriter"  #  optional
+      #   role_session_name: "fid-logging-session"  #  optional
+      #   path: "logs/%Y/%m/%d/"  #  optional
+      #   s3_object_key_format: "%{path}%{time_slice}_%{index}.%{file_extension}"  #  optional
+      #   store_as: "gzip"  #  optional
+      #   storage_class: "STANDARD_IA"  #  optional
+      #   format: "json"  #  optional
+      #   format_json_flatten: true  #  optional
+      #   compression: "gzip"  #  optional
+      #   check_object: true  #  optional
+      #   check_bucket: true  #  optional
+      #   use_server_side_encryption: true  #  optional
+      #   ssekms_key_id: "arn:aws:kms:us-west-2:123456789012:key/12345678-1234-1234-1234-123456789012"  #  optional
+      #   buffer:  #  optional
+      #     chunk_limit_size: "256M"  #  optional
+      #     flush_interval: "10s"  #  optional
+      #     total_limit_size: "1G"  #  optional
+
+      #  Example: Azure Event Hubs aggregator
+      #  Sends logs to Azure Event Hubs for real-time streaming analytics,
+      #  SIEM integration, or downstream processing with Azure services.
+      #  Uses fluent-plugin-azureeventhubs-radiant (HTTPS protocol)
+      # - name: "azure-events"  #  required unique aggregator name
+      #   type: "azure_event_hubs"  #  required aggregator type
+      #
+      #   # Connection (REQUIRED)
+      #   # Get from: Azure Portal → Event Hubs → Namespace → Shared access policies
+      #   connection_string: "Endpoint=sb://<namespace>.servicebus.windows.net/;SharedAccessKeyName=<policy>;SharedAccessKey=<key>"  #  required
+      #   hub_name: "fid-logs"  #  required - Event Hub name within namespace
+      #
+      #   # Record Enrichment
+      #   include_tag: true  #  optional - add Fluentd tag to each record
+      #   include_time: true  #  optional - add timestamp to each record
+      #   tag_time_name: "time"  #  optional - field name for timestamp (default: "time")
+      #
+      #   # Performance - Batching
+      #   batch: true  #  optional - enable batch mode for better throughput
+      #   max_batch_size: 20  #  optional - max records per batch (default: 20)
+      #
+      #   # Authentication & Security
+      #   expiry_interval: 3600  #  optional - SAS token expiry in seconds (default: 3600)
+      #   ssl_verify: true  #  optional - verify SSL certificates (default: true)
+      #
+      #   # Proxy Configuration (for corporate networks)
+      #   # proxy_addr: "proxy.example.com"  #  optional
+      #   # proxy_port: 3128  #  optional (default: 3128)
+      #
+      #   # Timeout Settings
+      #   # open_timeout: 60  #  optional - connection timeout in seconds (default: 60)
+      #   # read_timeout: 60  #  optional - read timeout in seconds (default: 60)
+      #
+      #   # Character Encoding
+      #   # coerce_to_utf8: true  #  optional - convert records to UTF-8 (default: true)
+      #   # non_utf8_replacement_string: " "  #  optional - replacement for non-UTF8 chars
+      #
+      #   # Debugging
+      #   # print_records: false  #  optional - log records to fluentd log (default: false)
+      #
+      #   # Custom Message Properties - adds metadata to each Event Hub message
+      #   # Useful for filtering/routing in downstream consumers
+      #   message_properties:  #  optional
+      #     environment: "production"  #  optional
+      #     cluster: "fid-cluster"  #  optional
+      #     application: "radiantone-fid"  #  optional
+      #
+      #   buffer:  #  optional
+      #     chunk_limit_size: "2M"  #  optional
+      #     flush_interval: "5s"  #  optional
+      #     retry_type: "exponential_backoff"  #  optional
+      #     retry_forever: true  #  optional
+
+      #  Example: OpenTelemetry aggregator (minimal)
+      # - name: "otel-collector"  # required: unique aggregator name referenced by logs[].aggregators
+      #   type: "opentelemetry"   # required: aggregator type
+      #   # required: use either endpoint OR host+port
+      #   endpoint: "http://otel-collector.monitoring.svc.cluster.local:4317"  # required (if no host+port)
+      #   protocol: "grpc"  # optional: "grpc" (default) or "http"
+      #
+      #  Example: OpenTelemetry aggregator (full capability)
+      #  Sends logs to OpenTelemetry Collector via OTLP (OpenTelemetry Protocol)
+      #  Supports both gRPC and HTTP/protobuf protocols for observability platforms
+      #  Uses fluent-plugin-opentelemetry
+      # - name: "otel-collector-full"  # required: unique aggregator name
+      #   type: "opentelemetry"        # required: aggregator type
+      #
+      #   # Connection (required: use either endpoint OR host+port)
+      #   # endpoint: "https://otel-collector.monitoring.svc.cluster.local:4317"  # optional (required if no host+port)
+      #   # host: "otel-collector.monitoring.svc.cluster.local"  # optional (required if no endpoint)
+      #   # port: 4317  # optional (required if no endpoint)
+      #
+      #   # Protocol Configuration
+      #   protocol: "grpc"  # optional: "grpc" (default) or "http"
+      #
+      #   # Service Identification (optional; static or dynamic - mutually exclusive)
+      #   # service_name: "fid-service"  # optional (mutually exclusive with service_name_key)
+      #   # service_name_key: "service"  # optional (mutually exclusive with service_name)
+      #
+      #   # Resource Attributes (optional; static or dynamic - mutually exclusive)
+      #   # resource_attributes:  # optional (mutually exclusive with resource_attributes_key)
+      #   #   service.name: "fid"  # optional
+      #   #   deployment.environment: "production"  # optional
+      #   # resource_attributes_key: "otel_resource"  # optional (mutually exclusive with resource_attributes)
+      #
+      #   # Custom Headers (optional; static or dynamic - mutually exclusive)
+      #   # headers:  # optional (mutually exclusive with headers_key)
+      #   #   Authorization: "Bearer YOUR_TOKEN"  # optional
+      #   # headers_key: "otel_headers"  # optional (mutually exclusive with headers)
+      #
+      #   # Timeouts (optional)
+      #   # timeout: 30  # optional: overall timeout (seconds)
+      #   # open_timeout: 10  # optional: connection timeout (seconds)
+      #   # read_timeout: 30  # optional: read timeout (seconds)
+      #
+      #   # Compression (optional)
+      #   # compression: "gzip"  # optional
+      #   # compression_level: 6  # optional
+      #
+      #   # Output shaping (optional)
+      #   # format: "json"  # optional
+      #   # json_array: false  # optional
+      #   # include_tag_key: true  # optional
+      #   # tag_key: "tag"  # optional
+      #   # remove_keys: "field1,field2"  # optional
+      #   # add_timestamp: true  # optional
+      #   # timestamp_key: "@timestamp"  # optional
+      #
+      #   # SSL/TLS Configuration (optional; both formats supported)
+      #   # Option 1: Nested SSL (EOC compatible)
+      #   # ssl:  # optional
+      #   #   enabled: true  # optional
+      #   #   verify: true  # optional
+      #   #   ca_path: "/certs/otel-ca.pem"  # optional
+      #   #   cert_path: "/certs/otel-client.pem"  # optional
+      #   #   key_path: "/certs/otel-client-key.pem"  # optional
+      #
+      #   # Option 2: Flat SSL parameters (also supported)
+      #   # insecure: false  # optional
+      #   # insecure_tls: false  # optional
+      #   # ca_file: "/certs/otel-ca.pem"  # optional
+      #   # ca_path: "/certs/ca-bundle"  # optional
+      #   # cert_file: "/certs/otel-client.pem"  # optional
+      #   # cert: "/certs/otel-client.pem"  # optional
+      #   # key_file: "/certs/otel-client-key.pem"  # optional
+      #   # key: "/certs/otel-client-key.pem"  # optional
+      #
+      #   buffer:  # optional: buffer settings (file buffer)
+      #     path: "/var/log/fluentd-buffers/opentelemetry.buffer"  # optional
+      #     flush_interval: "5s"  # optional
+      #     retry_type: "exponential_backoff"  # optional
+      #     chunk_limit_size: "2M"  # optional
+
+# Curator Configuration
+# -------------------
+# This section manages Elasticsearch index lifecycle.
+# Key Features:
+# - Index management settings
+# - Retention policies
+# - Connection configuration
+# - Security settings
+# - Job scheduling
+# - Resource allocation
+# Note: Important for log management and storage optimization.
+
+# Curator Configuration
+# -------------------
+# This section manages the Elasticsearch Curator, which handles index lifecycle management.
+# The curator uses the elasticsearch connection details from the default aggregator,
+# while allowing other settings to be customized as needed.
+
+# Curator Configuration
+curator:
+  enabled: false
+  dryrun: false  # Set to true for testing
+  # Client Configuration
+  # Used in fid.curator.getClientConfig helper
+  client:
+    hosts: ["elasticsearch-master"]
+    port: 9200
+    timeout: 300
+    master_only: false
+    # SSL settings if needed
+    use_ssl: false
+    ssl_no_validate: true
+    certificate: ""
+    client_cert: ""
+    client_key: ""
+    # Auth settings if needed
+    username: ""
+    password: ""
+
+  # Logging Configuration
+  # Used directly in curator-configmap.yaml
+  logging:
+    loglevel: INFO
+    logformat: default
+    blacklist: ['elasticsearch', 'urllib3']
+
+  # CronJob Settings
+  # Used in curator-cronjob.yaml
+  cronjob:
+    schedule: "0 1 * * *"  # Runs at 1 AM daily
+    concurrencyPolicy: "Forbid"
+    failedJobsHistoryLimit: 5
+    successfulJobsHistoryLimit: 5
+    jobRestartPolicy: Never
+    startingDeadlineSeconds: 600
+
+  # Resource Management
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 400m
+      memory: 512Mi
+
+  # Security Settings
+  rbac:
+    enabled: true
+
+  serviceAccount:
+    create: true
+    annotations: {}
+    name: ""  # If not set, will use the full name template
+
+  # Pod Settings
+  pod:
+    annotations: {}
+
+  psp:
+    create: false
+
+  # # Node Placement
+  # nodeSelector: {}
+  # affinity: {}
+  # tolerations: []
+
+  # Priority
+  priorityClassName: ""
+
+# Gateway Configuration
+# -------------------
+# This section configures Istio gateway settings.
+# Key Features:
+# - Protocol-specific port configuration
+# - Host routing rules
+# - TLS settings
+# - Service exposure
+# - Traffic management
+# - Security settings
+# Note: Required for Istio service mesh integration.
+
+istio:
+  enabled: false
+  gateway:
+    selector:
+      istio: ingress
+    hosts: []
+    #  - chart-example.local
+    http:
+      iddm:
+        name: "http-iddm"
+        port: 80
+        serviceName: "iddm-proxy-service"
+        servicePort: 80
+    https:
+      iddm:
+        name: "https-iddm"
+        port: 443
+        serviceName: "iddm-proxy-service"
+        servicePort: 443
+    ldap:
+      name: "ldap"
+      port: 389
+    ldaps:
+      name: "ldaps"
+      port: 636
+# Migration and Lifecycle Management
+# ================================
+# Comprehensive configuration for managing application lifecycle events.
+# Handles upgrades, backups, and data migrations.
+#
+# Key Components:
+# 1. Automated Migration Jobs
+# 2. Lifecycle Event Hooks
+# 3. Backup Integration
+# 4. Version Management
+#
+# Critical Operations:
+# - Data preservation during upgrades
+# - Configuration migration
+
+# Migration Job Configuration
+# -------------------------
+# Automated jobs for data migration and backup
+# Integrates with S3 for data storage
+#
+# Usage Scenarios:
+# - Regular backups
+# - Pre-upgrade snapshots
+# - Data migration between versions
+# - Configuration backups
+
+
+cronjob:
+  migration:
+    enabled: false
+    schedule: "0 0 * * *"
+    s3: "s3://fid-exports/cronjob"
+
+# Lifecycle Hooks Configuration
+# ---------------------------
+# Defines actions at various deployment lifecycle stages
+# Critical for maintaining application state and data integrity
+#
+# Hook Types:
+# 1. Installation Hooks
+#    - Pre-install: Environment preparation
+#    - Post-install: Initial configuration
+#
+# 2. Upgrade Hooks
+#    - Pre-upgrade: Data backup, state preparation
+#    - Post-upgrade: Migration, verification
+#
+# 3. Rollback Hooks
+#    - Pre-rollback: State preservation
+#    - Post-rollback: State restoration
+#
+# 4. Deletion Hooks
+#    - Pre-delete: Data backup
+#    - Post-delete: Cleanup operationss.
+
+hooks:
+  # Service Account for hooks
+  hooks_sa:
+    enabled: false
+
+  # Installation phase
+  pre_install:
+    enabled: false
+  post_install:
+    enabled: false
+
+  # Upgrade phase
+  pre_upgrade:
+    enabled: false
+    s3: "s3://fid-exports/pre_upgrade"
+  post_upgrade:
+    enabled: false
+
+  # Rollback phase
+  pre_rollback:
+    enabled: false
+  post_rollback:
+    enabled: false
+
+  # Deletion phase
+  pre_delete:
+    enabled: false
+  post_delete:
+    enabled: false
+
+# HDAP Migration Configuration
+# ----------------------------
+# Pre-upgrade export of HDAP data for Java 8 → Java 21 (FID 8.4.x → 9.0.0) upgrades.
+#
+# FID 9.0.0 introduces Java 21 + Lucene 10 (index format 9-10), which is binary-incompatible
+# with Java 8 + Lucene 8 (index format 6) used by all 8.x releases. A direct in-place upgrade
+# destroys HDAP data. This pre-upgrade hook exports HDAP using the OLD Java 8 JVM (Lucene 8
+# codecs), then the FID v9 upgrade-installer handles the import with Java 21 (Lucene 10).
+#
+# Two-job design (required by ReadWriteOnce PVC constraint):
+#   Job 1 (hook-weight 1): Version gate (8.4.x → 9.0.0 only); scales FID StatefulSet to 0.
+#   Job 2 (hook-weight 2): Mounts freed PVC; runs built-in migrate.sh to export HDAP.
+#
+# Pre-conditions (all must be true before enabling):
+#   1. hooks.hooks_sa.enabled: true        — creates fid-hook-account SA + Role
+#   2. persistence.enabled: true           — PVC r1-pvc-<fullname>-0 must exist
+#   3. hdapMigration.image.tag set         — any FID 8.4.x tag (minimum: "8.4.0")
+#   4. FID >= 8.4.0 currently installed    — rli.migration.hdap.all flag introduced in 8.4.0
+#
+# Usage:
+#   enabled: turns on support for the HDAP migration workflow in this chart.
+#   run: arm switch for the migration. Both must be true for hooks to render.
+#
+# Defaults to true for BOTH flags. The render gate at the top of the hook
+# template still requires target image major version == 9, so these defaults
+# are inert for same-major upgrades and for non-v9 installs. On subsequent
+# syncs after a successful migration, Job 1's sentinel short-circuit makes
+# the hooks a near-instant no-op (phase=completed → exit 0).
+#
+# Setting either to false when target is v9 triggers the pre-upgrade guard
+# Job (hook-weight 0, runs before Job 1), which fails the sync loudly with
+# a clear error message rather than silently skipping migration. This
+# prevents the silent-data-corruption class of bug where a v9 image is
+# applied on top of FID 8.x Lucene-8 indexes without first exporting HDAP
+# data.
+hdapMigration:
+  enabled: true
+  run: true
+  # Image used by HDAP migration hook Jobs that need kubectl (Job 1 scale-down,
+  # Job 2 orchestrator, Job 3 PVC cleanup, post-delete sentinel cleanup).
+  # Debian-based Bitnami build includes full coreutils (date, sort, head, wc,
+  # awk, grep, sleep, bash, jq) — use instead of distroless kubectl images
+  # (e.g. rancher/kubectl, registry.k8s.io/kubectl) which lack /bin/sh.
+  #
+  # Pinned to a concrete versioned tag rather than "latest" so upgrades behave
+  # deterministically. Bump deliberately when validated; do not depend on
+  # moving tags for hook execution.
+  #
+  # Namespace note: Broadcom moved Bitnami's versioned tags from "bitnami/"
+  # to "bitnamilegacy/" in 2025. bitnami/kubectl only publishes "latest" now;
+  # bitnamilegacy/kubectl retains the semver-pinned builds we need here.
+  scaleDownImage:
+    repository: bitnamilegacy/kubectl
+    tag: "1.31.0"
+  image:
+    # FALLBACK ONLY. The orchestrator auto-discovers the worker image from
+    # the live StatefulSet at runtime — that's the image the tenant was
+    # actually running, guaranteed to exist and to be Java-8 compatible.
+    # These values are used only if the STS read fails at runtime (rare).
+    repository: radiantone/fid
+    tag: "8.4.0"
+  # Seconds to wait for all FID pods to terminate before Job 2 starts.
+  # Increase if FID takes longer to drain connections in your environment.
+  scaleDownTimeout: 300
+  # Seconds to wait for fid-0 (leader) to become Ready after patching the
+  # StatefulSet with the v9 image. Covers: container pull, v9 installer,
+  # HDAP migration import, ZK leader election, startup probe.
+  leaderBootTimeout: 900
+  # Seconds to wait for full StatefulSet rollout after scaling from 1 to N.
+  # Each follower starts sequentially (OrderedReady), provisions a fresh PVC,
+  # and replicates HDAP data from the leader.
+  rolloutTimeout: 1800
+  job:
+    # Controls hook-delete-policy annotations.
+    # When true (default):
+    #   Helm:   before-hook-creation (required — Jobs are immutable, must delete to recreate)
+    #   ArgoCD: HookFailed (completed hooks persist and are skipped on next sync;
+    #           failed hooks are deleted and retried on next sync)
+    # When false: no delete policy annotations — hooks persist unconditionally.
+    delete: true
+
+# Dependencies Configuration
+# -----------------------
+# This section manages chart dependencies and their settings.
+# Key Features:
+# - ZooKeeper deployment
+# - Dependency enablement
+# - Version control
+# - Configuration inheritance
+# - Resource management
+# - Integration settings
+# Note: Critical for proper service dependencies.
+# Dependencies are disabled by default.
+
+dependencies:
+  zookeeper:
+    enabled: true
+
+# Values file Inputs for the dependency charts.
+zookeeper:
+  fullnameOverride: zookeeper
+  image:
+    tag: "3.5.8-secure"
+  metrics:
+    imageTag: secure
+  alternateName: fid
+  replicaCount: 3
+  persistence:
+    enabled: false
+    storageClass: ""
+  logging:
+    annotations:
+      enabled: false
+      config: {}
+      # config:
+      #   retention-policy: 7d
+
+# Environment Variable Management
+# =============================
+# Comprehensive environment variable configuration system.
+# Supports multiple sources and security levels.
+#
+# Variable Sources:
+# 1. Direct Values
+#    - Immediate configuration
+#    - Non-sensitive settings
+#
+# 2. Secrets
+#    - Sensitive information
+#    - Credentials
+#    - Keys and tokens
+#
+# 3. ConfigMaps
+#    - Configuration data
+#    - Non-sensitive settings
+#    - Shared configurations
+#
+# 4. Generated Secrets
+#    - Automatically created secrets
+#    - Dynamic configurations
+
+env:
+  # REQUIRED for v9 (Java 25) HDAP migration import on startup.
+  # Java 25's default subprocess launcher (posix_spawn) fails silently in
+  # containerized environments, which causes the v9 startup to skip the
+  # HDAP migration import. With FORK, the migration subprocess runs, the
+  # exported ZIP at /opt/radiantone/vds/hdap-migration/java-21-export.zip
+  # is imported into fresh Lucene 10 indexes, and FID boots cleanly.
+  # Without this, v9 hits IndexFormatTooOldException on old Lucene 8 indexes.
+  JAVA_TOOL_OPTIONS: "-Djdk.lang.Process.launchMechanism=FORK"
+
+## "valueFrom" environment variable references that will be added to deployment pods. Name is templated.
+## ref: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.19/#envvarsource-v1-core
+## Renders in container spec as:
+##   env:
+##     ...
+##     - name: <key>
+##       valueFrom:
+##         <value rendered as YAML>
+
+envValueFrom: {}
+  #  ENV_NAME:
+  #    configMapKeyRef:
+  #      name: configmap-name
+  #      key: value_key
+
+## The name of a secret in the same kubernetes namespace which contain values to be added to the environment
+## This can be useful for auth tokens, etc. Value is templated.
+envFromSecret: ""
+
+## Sensible environment variables that will be rendered as new secret object
+## This can be useful for auth tokens, etc
+envRenderSecret: {}
+
+## The names of secrets in the same kubernetes namespace which contain values to be added to the environment
+## Each entry should contain a name key, and can optionally specify whether the secret must be defined with an optional key.
+## Name is templated.
+envFromSecrets: []
+## - name: secret-name
+##   optional: true
+
+## The names of conifgmaps in the same kubernetes namespace which contain values to be added to the environment
+## Each entry should contain a name key, and can optionally specify whether the configmap must be defined with an optional key.
+## Name is templated.
+## ref: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.23/#configmapenvsource-v1-core
+envFromConfigMaps: []
+## - name: configmap-name
+##   optional: true
+
+# Extra Init Containers
+# ---------------------
+# Allows adding custom init containers to the pod.
+# In `statefulset.yaml`, these are added to the `initContainers` section.
+#
+# Affect on Deployment:
+# Can perform setup tasks before the main container starts.
+# Ensure they complete successfully to avoid startup issues.
+# Additional init containers (evaluated as template)
+# ref: https://kubernetes.io/docs/concepts/workloads/pods/init-containers/
+
+extraInitContainers: []
+
+# Extra Container Volumes
+# -----------------------
+# Volumes that can be used in init containers but not mounted to the main container.
+# In `statefulset.yaml`, these volumes are added to the `volumes` section.
+#
+# Affect on Deployment:
+# Useful for temporary data needed during initialization.
+extraContainerVolumes: []
+#  - name: volume-from-secret
+#    secret:
+#      secretName: secret-to-mount
+#  - name: empty-dir-volume
+#    emptyDir: {}
+
+# Volume Management Configuration
+# =============================
+# Additional volume configurations for supporting storage needs.
+# Provides flexibility for various storage requirements.
+#
+# Volume Types:
+# 1. Extra Volumes
+#    - Additional storage volumes
+#    - Configuration volumes
+#    - Shared storage
+#
+# 2. Volume Mounts
+#    - Mount points for volumes
+#    - Access path configuration
+#    - Read/write modes
+#
+# 3. Container Volumes
+#    - Init container storage
+#    - Temporary processing space
+#    - Shared state storage
+
+## @param extraVolumes Optionally specify extra list of additional volumes for the FID pod(s)
+## Example Use Case: mount certificates to enable TLS
+## e.g:
+## extraVolumes:
+## - name: fid-keystore
+##   secret:
+##     defaultMode: 288
+##     secretName: fid-keystore
+## - name: zookeeper-truststore
+##   secret:
+##     defaultMode: 288
+##     secretName: fid-truststore
+##
+extraVolumes: []
+## @param extraVolumeMounts Optionally specify extra list of additional volumeMounts for the ZooKeeper container(s)
+## Example Use Case: mount certificates to enable TLS
+## e.g:
+## extraVolumeMounts:
+## - name: fid-keystore
+##   mountPath: /certs/keystore
+##   readOnly: true
+## - name: fid-truststore
+##   mountPath: /certs/truststore
+##   readOnly: true
+##
+extraVolumeMounts: []
+## @param sidecars Add additional sidecar containers to the FID pod(s)
+## e.g:
+## sidecars:
+##   - name: your-image-name
+##     image: your-image
+##     imagePullPolicy: Always
+##     ports:
+##       - name: portname
+##         containerPort: 1234
+##
+
+# Sidecar Containers
+# ------------------
+# Adds additional containers to the pod.
+# In `statefulset.yaml`, these are appended to the `containers` list.
+#
+# Affect on Deployment:
+# Sidecars can provide auxiliary functions like logging or monitoring.
+# Be mindful of resource usage and potential conflicts.
+sidecars: []
+## @param postInstall Add additional commands to run after install, these commnds will run after first install
+## Example:
+## postInstall:
+##     enabled: true
+##     leaderOnly: true
+##     script: |
+##       # Custom script
+##       /opt/radiantone/vds/bin/vdsconfig.sh set-property -name agentsApiServerEndpoint -value "https://example.com/example"
+##
+
+# Lifecycle Hook Scripts
+# ----------------------
+# Specifies custom scripts to run at different lifecycle stages.
+# In `statefulset.yaml`, these scripts are integrated into the container's startup command.
+#
+# Fields:
+# - `preInstall`, `preStart`, `postInstall`, `postStart`: Scripts for respective lifecycle events.
+# - `enabled`: Enables the script.
+# - `leaderOnly`: If true, runs the script only on the leader pod.
+#
+# Affect on Deployment:
+# Allows customization of the deployment process.
+# Errors in scripts can prevent the application from starting.
+
+postInstall:
+  enabled: false
+  leaderOnly: true
+  script: |
+    # Post install custom script
+
+## @param postStart Add additional commands to run after startup, these commnds will run after start up
+## Example:
+## postStart:
+##     enabled: true
+##     leaderOnly: true
+##     script: |
+##       # Custom script
+##       /opt/radiantone/vds/bin/runDerbyServer.sh
+##
+postStart:
+  enabled: false
+  leaderOnly: true
+  script: |
+    # Post start custom script
+
+## @param preInstall Add additional commands to run after install, these commnds will run after first install
+## Example:
+## preInstall:
+##     enabled: true
+##     leaderOnly: true
+##     script: |
+##       # Custom script
+##
+preInstall:
+  enabled: false
+  leaderOnly: true
+  script: |
+    # Pre install custom script
+
+## @param preStart Add additional commands to run after startup, these commnds will run after start up
+## Example:
+## preStart:
+##     enabled: true
+##     leaderOnly: true
+##     script: |
+##       # Custom script
+##       /opt/radiantone/vds/bin/runDerbyServer.sh
+##
+preStart:
+  enabled: false
+  leaderOnly: true
+  script: |
+    # Pre start custom script
+
+## @param sentryDSN Add sentry DSN to push events to Sentry
+## Example:
+## sentryDSN: https://xxxxxxxxx.ingest.us.sentry.io/aaaaaaaaaa
+# sentryDSN:
+
+# Proxy Configuration
+# -----------------
+# This section defines the HAProxy-based reverse proxy settings.
+# Key Features:
+# - SSL/TLS termination
+# - Service routing rules
+# - Load balancing configuration
+# - Health check endpoints
+# - Security header management
+# - Custom timeout settings
+# Note: Critical for external access and service routing.
+
+proxy:
+  replicas: 1
+  image:
+    # repository: haproxytech/haproxy-alpine
+    # tag: "2.6.6"
+    repository: radiantone/haproxy
+    tag: "2.8"
+  service:
+    type: ClusterIP
+    port: 80
+    annotations: {}
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  podAnnotations: {}
+  podLabels: {}
+
+# IDDM Configuration
+# =================================
+# Comprehensive configuration for the UI layer and supporting microservices.
+# The frontend is composed of multiple specialized services that work together.
+#
+# Architecture Components:
+# 1. Main UI Layer
+# 2. API Gateway
+# 3. Authentication Service
+# 4. Directory Management Services
+# 5. System Administration
+# 6. Supporting Services
+#
+# Security Notes:
+# - Each service can have its own resource constraints
+# - Environment variables for service customization
+# - Service types control exposure level
+# - Version control through image tags
+
+frontEnd:
+  replicas: 1
+  apiGatewayUrl: "/api"
+  image:
+    repository: radiantone/iddm-ui-nightly
+    tag: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  env: {}
+  podAnnotations: {}
+  podLabels: {}
+
+# API Gateway Configuration
+# -----------------------
+# Central entry point for API requests
+# Handles routing and request management
+
+apiGateway:
+  replicas: 1
+  image:
+    repository: radiantone/iddm-api-gateway-nightly
+    tag: ""
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  env: {}
+  podAnnotations: {}
+  podLabels: {}
+
+# Authentication Service
+# --------------------
+# Manages user authentication and session handling
+
+authentication:
+  replicas: 1
+  image:
+    repository: radiantone/iddm-auth-nightly
+    tag: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  env: {}
+  podAnnotations: {}
+  podLabels: {}
+
+dataCatalog:
+  replicas: 1
+  image:
+    repository: radiantone/iddm-data-catalog-nightly
+    tag: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  env: {}
+  podAnnotations: {}
+  podLabels: {}
+
+# Directory Browser Service
+# Provides directory navigation and viewing
+
+directoryBrowser:
+  replicas: 1
+  image:
+    repository: radiantone/iddm-directory-browser-nightly
+    tag: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  env: {}
+  podAnnotations: {}
+  podLabels: {}
+
+# Directory Namespace Service
+# Handles namespace management and organization
+
+directoryNamespace:
+  replicas: 1
+  image:
+    repository: radiantone/iddm-directory-namespace-nightly
+    tag: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  env: {}
+  podAnnotations: {}
+  podLabels: {}
+
+# Directory Schema Service
+# Manages directory schema definitions
+
+directorySchema:
+  replicas: 1
+  image:
+    repository: radiantone/iddm-directory-schema-nightly
+    tag: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  env: {}
+  podAnnotations: {}
+  podLabels: {}
+
+# Settings Service
+# --------------
+# Manages application configuration and settings
+
+settings:
+  replicas: 1
+  image:
+    repository: radiantone/iddm-settings-nightly
+    tag: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  env: {}
+  podAnnotations: {}
+  podLabels: {}
+
+# System Administration Service
+# --------------------------
+# Handles system-wide administration tasks
+
+systemAdministration:
+  replicas: 1
+  image:
+    repository: radiantone/iddm-system-administration-nightly
+    tag: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  env: {}
+  podAnnotations: {}
+  podLabels: {}
+
+# Distributed Tracing
+# -----------------
+# Zipkin service for request tracing and debugging
+
+zipkin:
+  enabled: false
+  replicas: 1
+  image:
+    # repository: openzipkin/zipkin
+    repository: radiantone/zipkin
+    tag: "3"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  podAnnotations: {}
+  podLabels: {}
+
+httpRequestTimeout: 300000
+
+# Fluent Bit Configuration
+# -----------------------
+# This section manages container log collection and forwarding.
+# Key Features:
+# - Log collection from multiple service containers
+# - Configurable refresh intervals for log scanning
+# - Integration with Elasticsearch/OpenSearch
+# - Prometheus metrics exposure
+# - Custom parsing and filtering options
+# Note: Ensure proper log retention and storage capacity planning.
+
+fluent-bit:
+  enabled: false
+
+  # Hot Reload Configuration
+  # When enabled, fluent-bit will automatically reload configuration
+  # when the ConfigMap changes without pod restarts
+  hotReload:
+    enabled: true
+    image:
+      repository: ghcr.io/jimmidyson/configmap-reload
+      tag: v0.11.1
+    resources:
+      limits:
+        cpu: 100m
+        memory: 128Mi
+      requests:
+        cpu: 10m
+        memory: 32Mi
+
+  # Pod annotations for fluent-bit pods
+  podAnnotations: {}
+
+  # Node selector for Fluent Bit DaemonSet
+  nodeSelector: {}
+
+  # Resource limits for Fluent Bit pods
+  # resources:
+  #   limits:
+  #     cpu: 500m
+  #     memory: 512Mi
+  #   requests:
+  #     cpu: 100m
+  #     memory: 128Mi
+
+  # Core Fluent Bit settings
+  fullnameOverride: "fluent-bit"
+  flush: 1  # Interval to flush output (seconds)
+  logLevel: info  # Options: debug, info, warn, error
+  metricsPort: 2020
+
+  # Service configuration
+  service:
+    type: ClusterIP
+
+  # Prometheus monitoring
+  prometheusRule:
+    enabled: false
+  serviceMonitor:
+    enabled: false
+
+  # ConfigMap override (if you want to use a custom ConfigMap)
+  existingConfigMap: fluent-bit-config
+
+  # Log sources configuration
+  logs:
+    - name: fid
+      enable: true
+      path: /var/log/containers/fid-*.log
+      refresh_interval: 10
+      aggregators: ["default"]  # Specify which aggregators to send logs to
+    - name: zookeeper
+      enable: false
+      path: /var/log/containers/zookeeper-*.log
+      refresh_interval: 10
+      aggregators: ["default"]
+    - name: api-gateway
+      enable: true
+      path: /var/log/containers/api-gateway-*.log
+      refresh_interval: 10
+      aggregators: ["default"]
+    - name: authentication
+      enable: true
+      path: /var/log/containers/authentication-*.log
+      refresh_interval: 10
+      aggregators: ["default"]
+    - name: data-catalog
+      enable: true
+      path: /var/log/containers/data-catalog-*.log
+      refresh_interval: 10
+      aggregators: ["default"]
+    - name: directory-browser
+      enable: true
+      path: /var/log/containers/directory-browser-*.log
+      refresh_interval: 10
+      aggregators: ["default"]
+    - name: directory-namespace
+      enable: true
+      path: /var/log/containers/directory-namespace-*.log
+      refresh_interval: 10
+      aggregators: ["default"]
+    - name: directory-schema
+      enable: true
+      path: /var/log/containers/directory-schema-*.log
+      refresh_interval: 10
+      aggregators: ["default"]
+    - name: settings
+      enable: true
+      path: /var/log/containers/settings-*.log
+      refresh_interval: 10
+      aggregators: ["default"]
+    - name: system-administration
+      enable: true
+      path: /var/log/containers/system-administration-*.log
+      refresh_interval: 10
+      aggregators: ["default"]
+
+  # ========================================
+  # AGGREGATOR CONFIGURATION
+  # ========================================
+  # Two configuration formats are supported:
+  # 1. LEGACY FORMAT (Single Aggregator) - Deprecated but still functional
+  # 2. NEW FORMAT (Multi-Aggregator) - Recommended for new deployments
+  #
+  # IMPORTANT NOTES:
+  # - If only the legacy format is configured, it will work as before
+  # - If both formats are present, the NEW format takes precedence
+  # - The legacy format is maintained for backward compatibility
+
+  # ----------------------------------------
+  # LEGACY FORMAT: Single Aggregator Configuration (DEPRECATED)
+  # ----------------------------------------
+  # ⚠️ THIS FORMAT IS DEPRECATED - Please migrate to the new format below
+  # 📖 Migration Guide: See docs/fluent-bit/README.md#migration-guide
+  #
+  # This format still works for backward compatibility.
+  # It only supports a single aggregator destination.
+
+  outputSearchHost: "elasticsearch-master"  #  Options: "elasticsearch-master", "elasticsearch-master-internal", "opensearch-master"
+  outputSearchType: "es"  #  Options: "es", "opensearch"
+  # outputSearchPort: 9200
+  # outputSearchIndex: "fluent-bit"
+  # outputSearchUsername: ""
+  # outputSearchPassword: ""
+  # outputSearchLogstashFormat: true
+  # outputSearchLogstashPrefix: "fid-logs"
+  # outputSearchDocType: "_doc"
+  # outputSearchLogstashDateFormat: "%Y.%m.%d"
+
+  # ----------------------------------------
+  # NEW FORMAT: Multi-Aggregator Configuration (RECOMMENDED)
+  # ----------------------------------------
+  # ✅ Use this format for new deployments
+  # ✅ Supports multiple simultaneous aggregators
+  # ✅ More configuration options per aggregator
+  # ✅ Each log source can specify which aggregators to use
+  #
+  # To use the new format, uncomment 'aggregators:' and configure the destinations you need.
+  # When 'aggregators:' is defined, it takes precedence over the legacy format above.
+
+  # aggregators:
+  #   # Default Elasticsearch aggregator
+  #   - name: "default"  # Required: unique aggregator name
+  #     type: "elasticsearch"  # Required: aggregator type
+  #     host: "elasticsearch-master"  # Required
+  #     port: 9200  # Required
+  #     username: ""  # Optional
+  #     password: ""  # Optional
+  #     tls: false  # Optional
+  #     tlsVerify: false  # Optional
+  #     index: "fluent-bit"  # Optional
+  #     type: "_doc"  # Optional
+  #     logstashFormat: true  # Optional
+  #     logstashPrefix: "fid-logs"  # Optional
+  #     logstashDateFormat: "%Y.%m.%d"  # Optional
+  #     bufferSize: "4KB"  # Optional
+  #     retryLimit: false  # Optional
+  #     replaceDots: true  # Optional
+  #     suppressTypeName: true  # Optional
+  #
+  #   # OpenSearch aggregator
+  #   - name: "opensearch-prod"  # Required: unique aggregator name
+  #     type: "opensearch"  # Required: aggregator type
+  #     host: "my-domain.us-west-2.es.amazonaws.com"  # Required
+  #     port: 443  # Required
+  #     awsAuth: true  # Optional
+  #     awsRegion: "us-west-2"  # Optional
+  #     awsRole: "arn:aws:iam::123456789:role/fluent-bit"  # Optional
+  #     tls: true  # Optional
+  #     tlsVerify: true  # Optional
+  #     index: "fid-logs"  # Optional
+  #     type: "_doc"  # Optional
+  #     logstashFormat: true  # Optional
+  #     logstashPrefix: "fid"  # Optional
+  #     suppressTypeName: true  # Optional
+  #
+  #   # Grafana Loki aggregator
+  #   - name: "loki-prod"  # Required: unique aggregator name
+  #     type: "loki"  # Required: aggregator type
+  #     host: "loki.monitoring.svc"  # Required
+  #     port: 3100  # Required
+  #     # For Grafana Cloud:
+  #     username: ""  # Optional: Your Grafana Cloud instance ID
+  #     password: ""  # Optional: Your Grafana Cloud API token
+  #     tenantId: ""  # Optional: Usually same as username for Grafana Cloud
+  #     labels: "job=fluent-bit,environment=production"  # Optional
+  #     autoKubernetesLabels: "on"  # Optional
+  #     lineFormat: "json"  # Optional
+  #     removeKeys: "kubernetes.pod_id,stream"  # Optional
+  #     tls: false  # Optional
+  #     tlsVerify: false  # Optional
+  #     retryLimit: false  # Optional
+  #
+  #   # Amazon S3 aggregator (for archival)
+  #   - name: "s3-archive"  # Required: unique aggregator name
+  #     type: "s3"  # Required: aggregator type
+  #     bucket: "my-logs-bucket"  # Required
+  #     region: "us-west-2"  # Required
+  #     prefix: "fid-logs"  # Optional
+  #     roleArn: "arn:aws:iam::123456789:role/fluent-bit"  # Optional
+  #     totalFileSize: "50M"  # Optional
+  #     uploadTimeout: "10m"  # Optional
+  #     usePutObject: "On"  # Optional
+  #     compression: "gzip"  # Optional
+  #     contentType: "application/json"  # Optional
+  #
+  #   # Kafka aggregator
+  #   - name: "kafka-stream"  # Required: unique aggregator name
+  #     type: "kafka"  # Required: aggregator type
+  #     brokers: "kafka-0:9092,kafka-1:9092"  # Required
+  #     topics: "fid-logs"  # Optional
+  #     messageKey: "kubernetes.pod_name"  # Optional
+  #     timestampKey: "@timestamp"  # Optional
+  #     timestampFormat: "iso8601"  # Optional
+  #     retryLimit: false  # Optional
+  #
+  #   # Splunk aggregator
+  #   - name: "splunk-hec"  # Required: unique aggregator name
+  #     type: "splunk"  # Required: aggregator type
+  #     host: "splunk-hec.example.com"  # Required
+  #     port: 8088  # Required
+  #     token: "your-hec-token"  # Required
+  #     tls: true  # Optional
+  #     tlsVerify: false  # Optional
+  #     index: "kubernetes"  # Optional
+  #     source: "fluent-bit"  # Optional
+  #     sourcetype: "_json"  # Optional
+  #
+  #   # Sumo Logic aggregator
+  #   - name: "sumologic-collector"  # Required: unique aggregator name
+  #     type: "sumologic"  # Required: aggregator type
+  #     collectorUrl: "https://endpoint.sumologic.com/receiver/v1/http/..."  # Required
+  #     sourceName: "kubernetes"  # Optional
+  #     sourceCategory: "fid/logs"  # Optional
+  #     sourceCategoryPrefix: "prod"  # Optional
+  #     enrichWithK8sMeta: true  # Optional
+  #
+  #   # Standard output aggregator (for debugging)
+  #   - name: "stdout-debug"  # Required: unique aggregator name
+  #     type: "stdout"  # Required: aggregator type
+  #     format: "json_lines"  # Optional
+
+metricsService:
+  enabled: false
+  image:
+    repository: "ricoberger/script_exporter"
+    tag: "v2.12.0"
+
+# Enable the auto-config-promotion feature for IDDM configurations
+autoConfigPromotion:
+  enabled: false
+  # Changing volumeMountPath can result in permissions issues in certain kubernetes deployments
+  volumeMountPath: /opt/radiantone/git
+  persistence:
+    annotations: {}
+    storageClass: ""
+    size: 10Gi
+#  # The configurations to use git as the provider for this feature. Currently only git is supported
+#  git:
+#    repository:
+#    exportTo:
+#      branch:
+#    importFrom:
+#      branch:
+#    credentials:
+#      # It is recommended to implement your own secure secret (ie, SealedSecret, Vault, etc) and provide the name of the secret here
+#      # The secret should contain either GIT_PRIVATE_KEY or GIT_USERNAME/GIT_PASSWORD
+#      secretName:
+#
+#      # If you want to provide a private key directly without a secure secret mechanism, it can be done so here. Either in plain text or as base64
+#      privateKey:
+#      privateKeyBase64:
+#
+#      # If you want to provide a username/password directly without a secure secret mechanism, it can be done so here
+#      username:
+#      password:
+
+# Velero backup configuration
+backup:
+  enabled: false
+  velero:
+    createResources: true
+    namespace: ""
+    annotations: {}
+    labels: {}
+    schedule: 0 0 * * *
+    skipImmediately: true
+    backupSyncPeriod: 5m
+    bucket:
+      name: ""
+      region: ""
+      prefix: ""
+    retention: 7
+    storageLocation: {}
+    config:
+      storageLocation: ""
+      volumeSnapshotLocations: []
+      snapshotVolumes: true
+      csiSnapshotTimeout: 1h
+      filter:
+        includedResources:
+          - '*'
+        excludedResources:
+          - pods
+          - replicasets
+          - endpointslices
+          - endpoints
+        labelSelector:
+          matchLabels:
+            radiantlogic.io/app: fid
+
+# -----------------------------------------------------------------------------
+# -- Pre upgrade chart job
+# -----------------------------------------------------------------------------
+preUpgradeChart:
+  enabled: true
+  job:
+    delete: true
+    ttlSecondsAfterFinished: 300
+  image:
+    repository: "radiantone/kubectl"
+    tag: "secure"

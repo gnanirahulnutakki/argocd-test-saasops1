@@ -1,0 +1,39 @@
+{{- if and .Values.curator.enabled .Values.curator.serviceAccount.create (hasKey .Values "logging") .Values.logging .Values.logging.enabled (hasKey .Values.logging "fluentd") .Values.logging.fluentd .Values.logging.fluentd.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "fid.fullname" . }}-curator
+  labels:
+    {{- include "ficommond.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+{{- if hasKey .Values.curator "psp" }}
+{{- if .Values.curator.psp.create }}
+  - apiGroups: ["policy"]
+    resources: ["podsecuritypolicies"]
+    verbs: ["use"]
+    resourceNames:
+      - {{ include "fid.fullname" . }}-curator
+{{- end }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "fid.fullname" . }}-curator
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "fid.fullname" . }}-curator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "fid.fullname" . }}-curator
+    namespace: {{ .Release.Namespace }}
+{{- end }}

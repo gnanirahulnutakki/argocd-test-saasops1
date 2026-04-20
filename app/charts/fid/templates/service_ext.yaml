@@ -1,0 +1,23 @@
+{{- if not .Values.fid.readonly }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fid.fullname" . }}-ext
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+  {{- with (.Values.service).annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ports:
+    - port: 7070
+      name: cp-http
+    - port: 7171
+      name: cp-https
+  selector:
+    {{- include "fid.selectorLabels" . | nindent 4 }}
+    statefulset.kubernetes.io/pod-name: {{ include "fid.fullname" . }}-0
+  type: {{ .Values.service.type }}
+#  sessionAffinity: ClientIP
+{{- end }}

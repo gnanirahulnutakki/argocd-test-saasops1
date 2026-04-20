@@ -1,0 +1,183 @@
+{{/*
+=============================================================================
+Job 3 — Follower PVC Cleanup
+-----------------------------------------------------------------------------
+Runs at PreSync sync-wave 30 (after Job 2 finished the export).
+
+Deletes all follower PVCs (r1-pvc-fid-1, r1-pvc-fid-2, ...) so followers
+start fresh after the upgrade. fid-0 boots first (OrderedReady), finds
+java-21-export.zip on its PVC, runs the import, then followers come up
+with freshly-provisioned PVCs and replicate from the leader.
+
+Updates sentinel to phase=completed with ownerReferences preserved so the
+GC-on-SA-delete path still works.
+=============================================================================
+*/}}
+{{- $targetTag := (.Values.image.tag | default .Chart.AppVersion) -}}
+{{- $targetMajor := (index (splitList "." (index (splitList "-" $targetTag) 0)) 0) -}}
+{{- if eq $targetMajor "9" }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "fid.fullname" . }}-hdap-pvc-cleanup
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+    app.kubernetes.io/core-name: {{ include "fid.name" . }}
+    app.kubernetes.io/component: hdap-pvc-cleanup
+  annotations:
+    "helm.sh/hook": pre-upgrade,pre-install
+    "helm.sh/hook-weight": "30"
+    "argocd.argoproj.io/hook": PreSync
+    "argocd.argoproj.io/sync-wave": "30"
+    {{- if .Values.hdapMigration.job.delete }}
+    "helm.sh/hook-delete-policy": before-hook-creation
+    "argocd.argoproj.io/hook-delete-policy": HookFailed
+    {{- end }}
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: hdap-pvc-cleanup
+        {{- include "common.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "fid.fullname" . }}-hdap-migration-sa
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      {{- else }}
+      {{- with .Values.global.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      {{- if .Values.tolerations }}
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      {{- else }}
+      {{- with .Values.global.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      {{- if .Values.affinity }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- else }}
+      {{- with .Values.global.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      containers:
+        - name: hdap-pvc-cleanup
+          image: {{ .Values.hdapMigration.scaleDownImage.repository }}:{{ .Values.hdapMigration.scaleDownImage.tag }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+
+              FID_STS="{{ include "fid.fullname" . }}"
+              NS="{{ .Release.Namespace }}"
+              SENTINEL_CM="{{ include "fid.fullname" . }}-hdap-migration-state"
+              SA_NAME="{{ include "fid.fullname" . }}-hdap-migration-sa"
+              TARGET_VERSION="{{ .Values.image.tag | default .Chart.AppVersion }}"
+              REPLICAS="{{ .Values.replicaCount }}"
+
+              SENTINEL_PHASE=$(kubectl get configmap "$SENTINEL_CM" -n "$NS" \
+                -o jsonpath='{.data.phase}' 2>/dev/null || true)
+
+              if [ "$SENTINEL_PHASE" = "completed" ]; then
+                echo "Sentinel phase=completed. Skipping."
+                exit 0
+              fi
+
+              if [ "$SENTINEL_PHASE" != "exported" ]; then
+                echo "Sentinel phase='${SENTINEL_PHASE:-absent}'. Expected 'exported'."
+                if [ -z "$SENTINEL_PHASE" ]; then
+                  echo "No sentinel — non-qualifying upgrade. Exiting cleanly."
+                  exit 0
+                fi
+                echo "Job 2 did not reach phase=exported. Cannot safely proceed."
+                exit 1
+              fi
+
+              echo "Sentinel phase=exported confirmed. Cleaning up follower PVCs."
+
+              if [ "$REPLICAS" -gt 1 ] 2>/dev/null; then
+                echo "Deleting $((REPLICAS - 1)) follower PVC(s)..."
+                for i in $(seq 1 $((REPLICAS - 1))); do
+                  PVC_NAME="r1-pvc-${FID_STS}-${i}"
+                  echo "  Deleting PVC: $PVC_NAME"
+                  kubectl delete pvc "$PVC_NAME" -n "$NS" \
+                    --ignore-not-found=true --wait=true 2>/dev/null || true
+                done
+                echo "Follower PVC cleanup complete."
+              else
+                echo "replicaCount=1, no follower PVCs to delete."
+              fi
+
+              if kubectl get statefulset "${FID_STS}-follower" -n "$NS" > /dev/null 2>&1; then
+                FOLLOWER_REPLICAS=$(kubectl get statefulset "${FID_STS}-follower" -n "$NS" \
+                  -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)
+                if [ "$FOLLOWER_REPLICAS" -gt 0 ] 2>/dev/null; then
+                  echo "Deleting $FOLLOWER_REPLICAS follower-only PVC(s)..."
+                  for i in $(seq 0 $((FOLLOWER_REPLICAS - 1))); do
+                    PVC_NAME="r1-pvc-${FID_STS}-follower-${i}"
+                    echo "  Deleting PVC: $PVC_NAME"
+                    kubectl delete pvc "$PVC_NAME" -n "$NS" \
+                      --ignore-not-found=true --wait=true 2>/dev/null || true
+                  done
+                fi
+              fi
+
+              SA_UID=""
+              for i in 1 2 3 4 5 6; do
+                SA_UID=$(kubectl get sa "$SA_NAME" -n "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+                [ -n "$SA_UID" ] && break
+                sleep 5
+              done
+              if [ -z "$SA_UID" ]; then
+                echo "ERROR: Could not fetch SA $SA_NAME UID."
+                exit 1
+              fi
+
+              FROM_VERSION=$(kubectl get configmap "$SENTINEL_CM" -n "$NS" \
+                -o jsonpath='{.data.from-version}' 2>/dev/null || echo unknown)
+              TO_VERSION=$(kubectl get configmap "$SENTINEL_CM" -n "$NS" \
+                -o jsonpath='{.data.to-version}' 2>/dev/null || echo unknown)
+              ZIP_SHA=$(kubectl get configmap "$SENTINEL_CM" -n "$NS" \
+                -o jsonpath='{.data.zip-sha256}' 2>/dev/null || echo unknown)
+
+              cat <<YAML | kubectl apply -f - > /dev/null
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: ${SENTINEL_CM}
+                namespace: ${NS}
+                labels:
+                  app.kubernetes.io/component: hdap-migration
+                  app.kubernetes.io/name: {{ include "fid.name" . }}
+                  app.kubernetes.io/instance: {{ .Release.Name }}
+                ownerReferences:
+                  - apiVersion: v1
+                    kind: ServiceAccount
+                    name: ${SA_NAME}
+                    uid: ${SA_UID}
+                    blockOwnerDeletion: false
+              data:
+                phase: "completed"
+                from-version: "${FROM_VERSION}"
+                to-version: "${TO_VERSION}"
+                zip-sha256: "${ZIP_SHA}"
+                timestamp: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              YAML
+
+              echo "Sentinel updated: phase=completed"
+              echo "Follower PVC cleanup done. Sync phase will now apply v9 image to STS."
+{{- end }}

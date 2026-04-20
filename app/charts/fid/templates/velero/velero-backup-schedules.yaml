@@ -1,0 +1,39 @@
+{{- if and .Values.backup.enabled .Values.backup.velero.createResources (.Capabilities.APIVersions.Has "velero.io/v1/Schedule") }}
+{{- $volumeSnapshotLocations := .Values.backup.velero.config.volumeSnapshotLocations | default (list (printf "%s-fid-vsl" .Release.Name)) -}}
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: {{ .Release.Name }}-fid-v{{ .Chart.Version }}
+  namespace: {{ .Values.backup.velero.namespace }}
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+    app.kubernetes.io/component: velero
+    radiantlogic.io/backup-type: scheduled
+  {{- $veleroAnnotations := include "iddm.velero.annotations" . | fromYaml }}
+  {{- if $veleroAnnotations }}
+  annotations:
+    {{- $veleroAnnotations | toYaml | nindent 4 }}
+  {{- end }}
+spec:
+  schedule: {{ .Values.backup.velero.schedule | default "0 0 * * *" | quote }}
+  paused: {{ or ((.Values.global).hibernate) (not (.Values.backup.enabled | default false)) }}
+  skipImmediately: {{ .Values.backup.velero.skipImmediately | default true }}
+  template:
+    metadata:
+      labels:
+        radiantlogic.io/backup-type: scheduled
+        {{- include "iddm.velero.labels" . | nindent 8 }}
+    storageLocation: {{ .Values.backup.velero.config.storageLocation | default (printf "%s-fid-bsl" .Release.Name) }}
+    volumeSnapshotLocations:
+      {{- range $volumeSnapshotLocations }}
+      - {{ . }}
+      {{- end }}
+    ttl: {{ include "backup.retention" . }}
+    snapshotVolumes: {{ .Values.backup.velero.config.snapshotVolumes | default true }}
+    csiSnapshotTimeout: {{ .Values.backup.velero.config.csiSnapshotTimeout | default "1h" }}
+    includedNamespaces:
+      - {{ .Release.Namespace }}
+    {{- with .Values.backup.velero.config.filter }}
+    {{- toYaml . | nindent 4 }}
+    {{- end -}}
+{{- end }}

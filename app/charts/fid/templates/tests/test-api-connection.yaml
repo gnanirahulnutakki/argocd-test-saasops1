@@ -1,0 +1,72 @@
+{{- if semverCompare ">=8.1-0" (.Values.image.tag | default .Chart.AppVersion) -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "{{ .Release.Name }}-test-api-gateway"
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test-success
+spec:
+  ttlSecondsAfterFinished: 60
+  template:
+    spec:
+      containers:
+        - name: test-api-gateway
+          image: alpine/curl
+          imagePullPolicy: "IfNotPresent"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -ex
+              echo 1. "Testing API Gateway Service"
+              # Internal service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://api-gateway-service/actuator/health
+              # Proxy service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://iddm-proxy-service/api/actuator/health
+              echo "2. Testing Authenication Service"
+              # Internal service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://authentication-service/actuator/health
+              # Proxy service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://iddm-proxy-service/api/authentication-service/actuator/health
+              echo "3. Testing Data Catalog Service"
+              # Internal service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://data-catalog-service/actuator/health
+              # Proxy service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://iddm-proxy-service/api/data-catalog-service/actuator/health
+              echo "4. Testing Data Catalog Service"
+              # Internal service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://data-catalog-service/actuator/health
+              # Proxy service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://iddm-proxy-service/api/data-catalog-service/actuator/health
+              echo "5. Testing Directory Browser Service"
+              # Internal service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://directory-browser-service/actuator/health
+              # Proxy service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://iddm-proxy-service/api/directory-browser-service/actuator/health
+              echo "6. Testing Directory Namespace Service"
+              # Internal service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://directory-namespace-service/actuator/health
+              # Proxy service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://iddm-proxy-service/api/directory-namespace-service/actuator/health
+              echo "7. Testing Directory Schema Service"
+              # Internal service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://directory-schema-service/actuator/health
+              # Proxy service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://iddm-proxy-service/api/directory-schema-service/actuator/health
+              echo "8. Testing Settings Service"
+              # Internal service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://settings-service/actuator/health
+              # Proxy service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://iddm-proxy-service/api/settings-service/actuator/health
+              echo "9. Testing System Administration Service"
+              # Internal service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://system-administration-service/actuator/health
+              # Proxy service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://iddm-proxy-service/api/system-administration-service/actuator/health
+      restartPolicy: Never
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

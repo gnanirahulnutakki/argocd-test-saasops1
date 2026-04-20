@@ -1,0 +1,88 @@
+{{- if semverCompare ">=8.1-0" (.Values.image.tag | default .Chart.AppVersion) -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: iddm-proxy-cm
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+data:
+  haproxy.cfg: |
+    #global
+      #log stdout format raw local0
+    defaults
+      timeout connect 10s
+      timeout client 30s
+      timeout server 300s
+      {{- if .Values.httpRequestTimeout }}
+      timeout http-request {{ .Values.httpRequestTimeout | default "10000" }}
+      {{- end }}
+      #log global
+      log stdout format raw local0
+      mode http
+      option httplog
+      maxconn 3000
+    frontend http-in
+      bind *:8080
+      bind *:8443 ssl crt /certs/haproxy.pem
+      default_backend controlpanel_backend
+
+      stats enable
+      stats refresh 30s
+      stats show-node
+      stats uri /stats
+      monitor-uri /healthz
+
+      # Remove unnecessary headers
+      http-response del-header Server
+      http-response del-header X-Powered-By
+      http-response del-header X-AspNetMvc-Version
+      http-response del-header X-AspNet-Version
+      http-response del-header X-Drupal-Cache
+      http-response del-header X-Drupal-Dynamic-Cache
+      http-response del-header X-Generator
+      http-response del-header X-Runtime
+      http-response del-header X-Rack-Cache
+
+      # Add security headers
+      http-response set-header Strict-Transport-Security "max-age=16000000; includeSubDomains; preload;"
+      http-response set-header X-Frame-Options "SAMEORIGIN"
+      http-response set-header X-Content-Type-Options "nosniff"
+      http-response set-header Referrer-Policy no-referrer-when-downgrade
+      http-response set-header X-XSS-Protection 1;mode=block
+      http-response set-header Permissions-Policy interest-cohort=()
+
+      # routing
+      use_backend classic_controlpanel_backend if { path /classic } or { path_beg /classic/ }
+      use_backend classic_controlpanel_backend if { path /main } or { path_beg /main/ }
+      use_backend classic_controlpanel_backend if { path /portal } or { path_beg /portal/ }
+      use_backend api_backend if { path /api } or { path_beg /api/ }
+      use_backend admin_backend if { path /admin-service } or { path_beg /admin-service/ }
+      use_backend rest_backend if { path /rest-service } or { path_beg /rest-service/ }
+{{- if (((.Values).metricsService).enabled | default false) }}
+      use_backend metrics_backend if { path /metrics-service } or { path_beg /metrics-service/ }
+{{- end }}
+{{- if (((.Values).sssService).enabled | default false) }}
+      use_backend sss_backend if { path /sss-service } or { path_beg /sss-service/ }
+{{- end }}
+
+    # backends
+    backend classic_controlpanel_backend
+      http-request set-path %[path,regsub(^/classic/,/,g)]
+      server classic_controlpanel {{ include "fid.fullname" . }}-ext:7171 check ssl verify none
+    backend controlpanel_backend
+      server controlpanel iddm-ui-service:80 check
+    backend api_backend
+      http-request replace-path /api(/)?(.*) /\2
+      server api api-gateway-service:80 check
+    backend admin_backend
+      http-request replace-path /admin-service(/)?(.*) /\2
+      server admin {{ include "fid.fullname" . }}-admin:9101 check ssl verify none
+    backend rest_backend
+      http-request replace-path /rest-service(/)?(.*) /\2
+      server rest {{ include "fid.fullname" . }}-app:8090 check ssl verify none
+{{- if (((.Values).sssService).enabled | default false) }}    
+    backend sss_backend
+      http-request replace-path /sss-service(/)?(.*) /\2
+      server sss sss-service:80 check
+{{- end }}      
+{{- end }}

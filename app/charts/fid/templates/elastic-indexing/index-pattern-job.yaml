@@ -1,0 +1,146 @@
+{{- if .Values.logging.indexCreation.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "fid.fullname" . }}-index-patterns
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "1"
+    argocd.argoproj.io/hook: Sync
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "common.labels" . | nindent 8 }}
+        app.kubernetes.io/component: index-pattern-creator
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and .Values.logging.indexCreation.rbac.enabled }}
+      serviceAccountName: {{ include "fid.fullname" . }}-index-patterns
+      {{- end }}
+      restartPolicy: Never
+      containers:
+        - name: pattern-creator
+          image: alpine:3.18
+          command: ["/bin/sh"]
+          args:
+            - -exc
+            - |
+              echo "Installing dependencies..."
+              apk add --no-cache curl jq
+
+              echo "Starting Index Pattern Creation Job..."
+              echo "Kibana endpoint: ${KIBANA_SCHEME}://${KIBANA_HOST}:${KIBANA_PORT}${KIBANA_PATH}"
+
+              # Fetch existing index patterns
+              echo "Fetching existing index patterns from Kibana..."
+              existing_patterns=$(curl -sS -X GET "${KIBANA_SCHEME}://${KIBANA_HOST}:${KIBANA_PORT}${KIBANA_PATH}/api/saved_objects/_find?type=index-pattern&per_page=100" \
+                -H "kbn-xsrf: true" -u "${KIBANA_USER}:${KIBANA_PASSWORD}" | jq -r '.saved_objects[].attributes.title' || true)
+
+              echo "Existing patterns in Kibana:"
+              echo "$existing_patterns"
+
+              create_pattern() {
+                local pattern="$1"
+                echo "Checking if pattern $pattern already exists..."
+
+                if echo "$existing_patterns" | grep -Fxq "$pattern"; then
+                  echo "Index pattern '$pattern' already exists; skipping creation."
+                  return 0
+                fi
+
+                echo "Creating index pattern: $pattern"
+                pattern_response=$(curl -sS -w "\n%{http_code}" \
+                  -X POST "${KIBANA_SCHEME}://${KIBANA_HOST}:${KIBANA_PORT}${KIBANA_PATH}/api/saved_objects/index-pattern" \
+                  -H "kbn-xsrf: true" \
+                  -H "Content-Type: application/json" \
+                  -u "${KIBANA_USER}:${KIBANA_PASSWORD}" \
+                  -d '{
+                    "attributes": {
+                      "title": "'"$pattern"'",
+                      "timeFieldName": "@timestamp"
+                    }
+                  }')
+
+                pattern_status=$(echo "$pattern_response" | tail -n1)
+                pattern_body=$(echo "$pattern_response" | head -n-1)
+
+                echo "Response status: $pattern_status"
+                echo "Response body: $pattern_body"
+
+                if [ "$pattern_status" -ge 400 ]; then
+                  echo "Failed to create index pattern '$pattern'"
+                  return 1
+                fi
+
+                return 0
+              }
+
+              new_patterns_created=false
+
+              {{- range $logName, $logCfg := .Values.logging.fluentd.logs }}
+                {{- if $logCfg.enabled }}
+
+                  {{- $aggregators := list }}
+                  {{- range $agg := splitList "," (join "," $logCfg.aggregators) }}
+                    {{- $aggregators = append $aggregators (lower $agg) }}
+                  {{- end }}
+
+                  {{- if has "default" $aggregators }}
+                    echo "Processing log: {{ $logName }}"
+
+                    {{- $baseName := $logCfg.index | default $logName -}}
+
+                    {{- if not (hasSuffix ".log" $baseName) -}}
+                      {{- $baseName = printf "%s.log" $baseName -}}
+                    {{- end }}
+
+                    {{- $finalPattern := printf "%s*" $baseName -}}
+                    echo "Derived pattern: {{ $finalPattern }}"
+
+                    if create_pattern "{{ $finalPattern }}"; then
+                      new_patterns_created=true
+                    else
+                      echo "Failed to create pattern: {{ $finalPattern }}"
+                      exit 1
+                    fi
+                  {{- end }}
+                {{- end }}
+              {{- end }}
+
+              echo "Final verification: Listing all index patterns..."
+              curl -sS "${KIBANA_SCHEME}://${KIBANA_HOST}:${KIBANA_PORT}${KIBANA_PATH}/api/saved_objects/_find?type=index-pattern&per_page=100" \
+                -H "kbn-xsrf: true" \
+                -u "${KIBANA_USER}:${KIBANA_PASSWORD}" | jq .
+
+              if [ "$new_patterns_created" = true ]; then
+                echo "New index patterns were created successfully."
+              else
+                echo "No new index patterns were created."
+              fi
+
+              echo "Job completed."
+          env:
+            - name: KIBANA_HOST
+              value: {{ .Values.logging.indexCreation.kibana.host | quote }}
+            - name: KIBANA_PORT
+              value: {{ .Values.logging.indexCreation.kibana.port | default "61853" | quote }}
+            - name: KIBANA_SCHEME
+              value: {{ .Values.logging.indexCreation.kibana.scheme | default "http" | quote }}
+            - name: KIBANA_PATH
+              value: "/eoc-backend/kibana"
+            {{- if .Values.logging.indexCreation.kibana.user }}
+            - name: KIBANA_USER
+              value: {{ .Values.logging.indexCreation.kibana.user | quote }}
+            {{- end }}
+            {{- if .Values.logging.indexCreation.kibana.password }}
+            - name: KIBANA_PASSWORD
+              value: {{ .Values.logging.indexCreation.kibana.password | quote }}
+            {{- end }}
+{{- end }}

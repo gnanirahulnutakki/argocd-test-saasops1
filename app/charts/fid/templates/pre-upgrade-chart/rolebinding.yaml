@@ -1,0 +1,21 @@
+{{- if .Values.preUpgradeChart.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "fid.fullname" . }}-delete-resources-rolebinding
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-delete-policy": hook-succeeded,hook-failed,before-hook-creation
+    "argocd.argoproj.io/hook": PreSync
+    "argocd.argoproj.io/hook-delete-policy": HookSucceeded,HookFailed,BeforeHookCreation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "fid.fullname" . }}-delete-resources-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "fid.fullname" . }}-delete-resources-sa
+    namespace: {{ .Release.Namespace }}
+{{- end }}

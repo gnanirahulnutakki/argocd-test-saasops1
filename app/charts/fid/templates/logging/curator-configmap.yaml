@@ -1,0 +1,47 @@
+{{- if and .Values.curator.enabled (hasKey .Values "logging") .Values.logging .Values.logging.enabled (hasKey .Values.logging "fluentd") .Values.logging.fluentd .Values.logging.fluentd.enabled }}
+{{- $clusterName := .Values.zk.clusterName | default "fid-cluster" }}
+
+{{/* Find and validate the default aggregator */}}
+{{- $defaultAggregator := include "fid.curator.findDefaultAggregator" (dict "aggregators" .Values.logging.fluentd.aggregators) | fromYaml }}
+{{- $validationError := include "fid.curator.validateAggregator" $defaultAggregator -}}
+{{- if $validationError -}}
+  {{- fail $validationError -}}
+{{- end -}}
+
+{{/* Get curator client config */}}
+{{- $curatorClientConfig := include "fid.curator.getClientConfig" (dict "defaultConfig" .Values.curator.client "aggregator" $defaultAggregator) | fromYaml }}
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "fid.fullname" . }}-curator-config
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+data:
+  config.yml: |-
+    client:
+      hosts:
+      {{- range .Values.curator.client.hosts }}
+        - {{ . | quote }}
+      {{- end }}
+      port: {{ .Values.curator.client.port }}
+      url_prefix:
+      use_ssl: {{ .Values.curator.client.use_ssl | default false }}
+      certificate: {{ .Values.curator.client.certificate | default "" | quote }}
+      client_cert: {{ .Values.curator.client.client_cert | default "" | quote }}
+      client_key: {{ .Values.curator.client.client_key | default "" | quote }}
+      ssl_no_validate: {{ .Values.curator.client.ssl_no_validate | default true }}
+      username: {{ .Values.curator.client.username | quote }}
+      password: {{ .Values.curator.client.password | quote }}
+      timeout: {{ .Values.curator.client.timeout | default 300 }}
+      master_only: {{ .Values.curator.client.master_only | default false }}
+
+    logging:
+      loglevel: {{ .Values.curator.logging.loglevel | default "INFO" }}
+      logfile:
+      logformat: {{ .Values.curator.logging.logformat | default "default" }}
+      blacklist: {{ .Values.curator.logging.blacklist | default (list "elasticsearch" "urllib3") }}
+
+  action_file.yml: |-
+    {{- include "fid.curator.getActionList" (dict "clusterName" $clusterName "logConfigs" .Values.logging.fluentd.logs "curatorConfig" .Values.curator) | nindent 4 }}
+{{- end }}

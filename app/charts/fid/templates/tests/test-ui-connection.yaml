@@ -1,0 +1,32 @@
+{{- if semverCompare ">=8.1-0" (.Values.image.tag | default .Chart.AppVersion) -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "{{ .Release.Name }}-test-ui"
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test-success
+spec:
+  ttlSecondsAfterFinished: 60
+  template:
+    spec:
+      containers:
+        - name: test-ui
+          image: alpine/curl
+          imagePullPolicy: "IfNotPresent"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -ex
+              echo "Testing UI Service"
+              # Internal service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://iddm-ui-service/health
+              # Proxy service
+              curl --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 5 --retry-max-time 60 --retry-all-errors http://iddm-proxy-service
+      restartPolicy: Never
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

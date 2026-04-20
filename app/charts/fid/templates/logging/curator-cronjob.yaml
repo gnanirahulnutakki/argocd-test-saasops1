@@ -1,0 +1,43 @@
+{{- if and .Values.curator.enabled (hasKey .Values "logging") .Values.logging .Values.logging.enabled (hasKey .Values.logging "fluentd") .Values.logging.fluentd .Values.logging.fluentd.enabled }}
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "fid.fullname" . }}-curator
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.curator.cronjob.schedule | quote }}
+  concurrencyPolicy: {{ .Values.curator.cronjob.concurrencyPolicy }}
+  failedJobsHistoryLimit: {{ .Values.curator.cronjob.failedJobsHistoryLimit }}
+  successfulJobsHistoryLimit: {{ .Values.curator.cronjob.successfulJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- include "common.labels" . | nindent 12 }}
+        spec:
+          containers:
+            - name: curator
+              image: bitnami/elasticsearch-curator-archived:5.8.4-debian-10-r253
+              imagePullPolicy: IfNotPresent
+              args:
+              {{- if .Values.curator.dryrun }}
+              - --dry-run
+              {{- end }}
+              - --config
+              - /etc/es-curator/config.yml
+              - /etc/es-curator/action_file.yml
+              volumeMounts:
+                - name: config-volume
+                  mountPath: /etc/es-curator
+              resources:
+                {{- toYaml .Values.curator.resources | nindent 16 }}
+          restartPolicy: {{ .Values.curator.cronjob.jobRestartPolicy }}
+          volumes:
+            - name: config-volume
+              configMap:
+                name: {{ include "fid.fullname" . }}-curator-config
+
+{{- end }}

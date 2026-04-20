@@ -1,0 +1,222 @@
+{{- if and (((.Values).metrics).enabled | default false) .Values.replicaCount }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: iddm-metrics-service
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    scripts:
+      - name: fid_ldaps
+        command: /etc/script-exporter/fid_ldaps.sh
+      - name: fid_status
+        command: /etc/script-exporter/fid_status.sh
+
+  fid_ldaps.sh: |
+    #!/bin/bash
+    nc -z fid-app 2636
+    exit $?
+
+  fid_status.sh: |
+    #! /bin/bash
+
+    nc -z {{ template "fid.fullname" . }}-app 2636
+    FID_LDAPS_STATUS=$?
+    echo "# HELP fid_ldaps_status The current status of the LDAPS service. 0 means online and any other number means offline"
+    echo "# TYPE fid_ldaps_status gauge"
+    echo "fid_ldaps_status{clustername=\"$CLUSTER_NAME\"} $FID_LDAPS_STATUS"
+    echo ""
+    nc -z {{ template "fid.fullname" . }}-app 2389
+    FID_LDAP_STATUS=$?
+    echo "# HELP fid_ldap_status The current status of the LDAP service. 0 means online and any other number means offline"
+    echo "# TYPE fid_ldap_status gauge"
+    echo "fid_ldap_status{clustername=\"$CLUSTER_NAME\"} $FID_LDAP_STATUS"
+    echo ""
+    nc -z {{ template "fid.fullname" . }}-app 8089
+    FID_HTTP_STATUS=$?
+    echo "# HELP fid_http_status The current status of the HTTP/REST service. 0 means online and any other number means offline"
+    echo "# TYPE fid_http_status gauge"
+    echo "fid_http_status{clustername=\"$CLUSTER_NAME\"} $FID_HTTP_STATUS"
+    echo ""
+    nc -z {{ template "fid.fullname" . }}-app 8090
+    FID_HTTPS_STATUS=$?
+    echo "# HELP fid_https_status The current status of the HTTPS/REST service. 0 means online and any other number means offline"
+    echo "# TYPE fid_https_status gauge"
+    echo "fid_https_status{clustername=\"$CLUSTER_NAME\"} $FID_HTTPS_STATUS"
+    echo ""
+    nc -z {{ template "fid.fullname" . }}-ext 7070
+    FID_CP_HTTP_STATUS=$?
+    echo "# HELP fid_cp_http_status The current status of the Classic Control Panel (HTTP) service. 0 means online and any other number means offline"
+    echo "# TYPE fid_cp_http_status gauge"
+    echo "fid_cp_http_status{clustername=\"$CLUSTER_NAME\"} $FID_CP_HTTP_STATUS"
+    echo ""
+    nc -z {{ template "fid.fullname" . }}-ext 7171
+    FID_CP_HTTPS_STATUS=$?
+    echo "# HELP fid_cp_https_status The current status of the Classic Control Panel (HTTPS) service. 0 means online and any other number means offline"
+    echo "# TYPE fid_cp_https_status gauge"
+    echo "fid_cp_https_status{clustername=\"$CLUSTER_NAME\"} $FID_CP_HTTPS_STATUS"
+    echo ""
+    nc -z {{ template "fid.fullname" . }}-admin 9100
+    FID_ADMIN_HTTP_STATUS=$?
+    echo "# HELP fid_admin_http_status The current status of the Admin (HTTP) service. 0 means online and any other number means offline"
+    echo "# TYPE fid_admin_http_status gauge"
+    echo "fid_admin_http_status{clustername=\"$CLUSTER_NAME\"} $FID_ADMIN_HTTP_STATUS"
+    echo ""
+    nc -z {{ template "fid.fullname" . }}-admin 9101
+    FID_ADMIN_HTTPS_STATUS=$?
+    echo "# HELP fid_admin_https_status The current status of the Admin (HTTPS) service. 0 means online and any other number means offline"
+    echo "# TYPE fid_admin_https_status gauge"
+    echo "fid_admin_https_status{clustername=\"$CLUSTER_NAME\"} $FID_ADMIN_HTTPS_STATUS"
+    echo ""
+    nc -z zookeeper-app 2181
+    FID_ZK_STATUS=$?
+    echo "# HELP fid_zk_status The current status of the Zookeeper service. 0 means online and any other number means offline"
+    echo "# TYPE fid_zk_status gauge"
+    echo "fid_zk_status{clustername=\"$CLUSTER_NAME\"} $FID_ZK_STATUS"
+    echo ""
+
+    if [ $FID_ADMIN_HTTPS_STATUS = 0 ]; then
+      curl -k --silent https://{{ template "fid.fullname" . }}-admin:9101/adminapp/data/metrics/cluster-latency | sed 's/cluster_name=/clustername=/g'
+      echo ""
+
+      curl -k --silent https://{{ template "fid.fullname" . }}-admin:9101/adminapp/data/metrics/cluster-info | sed 's/cluster_name=/clustername=/g'
+      echo ""
+
+      curl -k --silent https://{{ template "fid.fullname" . }}-admin:9101/adminapp/data/metrics/cluster-ldap | sed 's/cluster_name=/clustername=/g'
+      echo ""
+
+      curl -k --silent https://{{ template "fid.fullname" . }}-admin:9101/adminapp/data/metrics/hdap-store | sed 's/cluster_name=/clustername=/g'
+      echo ""
+
+      curl -k --silent https://{{ template "fid.fullname" . }}-admin:9101/adminapp/data/metrics/node-monitor | sed 's/cluster_name=/clustername=/g'
+      echo ""
+
+      curl -k --silent https://{{ template "fid.fullname" . }}-admin:9101/adminapp/data/metrics/node-status | sed 's/cluster_name=/clustername=/g'
+      echo ""
+
+    #  curl -k --silent https://{{ template "fid.fullname" . }}-admin:9101/v8/admin/iddm_metrics/collect  -H "x-api-key: $IDDM_API_KEY" | sed 's/cluster_name=/clustername=/g'
+    #  echo ""
+    fi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: iddm-metrics-service
+  labels:
+    app: iddm-metrics-service
+    {{- include "common.labels" . | nindent 4 }}
+  annotations:
+    prometheus.io/path: '/probe'
+    prometheus.io/param_script: fid_status
+    prometheus.io/port: '9469'
+    prometheus.io/scrape: 'true'
+spec:
+  type: ClusterIP
+  ports:
+    - port: 9469
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/component: iddm-metrics-service
+    {{- include "common.selectorLabels" . | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iddm-metrics-service
+  labels:
+    app.kubernetes.io/component: iddm-metrics-service
+    {{- include "common.labels" . | nindent 4 }}
+spec:
+  # replicas: 1
+  replicas: {{ (.Values.global.hibernate | default false) | ternary 0 1 }}
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: iddm-metrics-service
+      {{- include "common.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: iddm-metrics-service
+        {{- include "common.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 6 }}
+      {{- end }}
+      {{- if .Values.podSecurityContext.enabled }}
+      securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.podSecurityContext "context" $) | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: iddm-metrics-service
+          {{- if .Values.securityContext.enabled }}
+          securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.securityContext "context" $) | nindent 12 }}
+          {{- end }}
+          image: {{ (.Values.metrics).image | default "radiantone/script_exporter" }}:{{ (.Values.metrics).tag | default "v2.24.3" }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - -config.file=/etc/script-exporter/config.yaml
+          ports:
+            - name: http
+              containerPort: 9469
+              protocol: TCP
+          env:
+            - name: CLUSTER_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ template "fid.fullname" . }}
+                  key: ZK_CLUSTER
+          {{- if .Values.fid.adminApiKey }}
+            - name: IDDM_API_KEY
+              value: {{ .Values.fid.adminApiKey }}
+            - name: IDDM_SERVICE_ACCOUNT_PASSWORD
+              value: {{ .Values.fid.adminApiKey }}
+          {{- else }}
+            - name: IDDM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: fid-admin-api-key
+                  name: rootcreds-{{ template "fid.fullname" . }}
+                  optional: true
+            - name: IDDM_SERVICE_ACCOUNT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: fid-admin-api-key
+                  name: rootcreds-{{ template "fid.fullname" . }}
+                  optional: true
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/script-exporter
+              readOnly: true
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext: {}
+      volumes:
+        - name: config
+          configMap:
+            name: iddm-metrics-service
+            defaultMode: 511
+{{- end }}

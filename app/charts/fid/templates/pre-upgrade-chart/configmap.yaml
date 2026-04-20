@@ -1,0 +1,116 @@
+{{- if .Values.preUpgradeChart.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "fid.fullname" . }}-pre-upgrade-chart
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+    app.kubernetes.io/core-name: {{ include "fid.name" . }}
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-delete-policy": hook-succeeded,hook-failed,before-hook-creation
+    "argocd.argoproj.io/hook": PreSync
+    "argocd.argoproj.io/hook-delete-policy": HookSucceeded,HookFailed,BeforeHookCreation
+data:
+  rendered-selectors.yaml: |-
+    - kind: Deployment
+      name: api-gateway
+      namespace: {{ .Release.Namespace }}
+      podSelectors:
+        app.kubernetes.io/component: api-gateway
+        {{- include "common.selectorLabels" . | nindent 8 }}
+
+    - kind: Deployment
+      name: authentication
+      namespace: {{ .Release.Namespace }}
+      podSelectors:
+        app.kubernetes.io/component: authentication-service
+        {{- include "common.selectorLabels" . | nindent 8 }}
+
+    - kind: Deployment
+      name: data-catalog
+      namespace: {{ .Release.Namespace }}
+      podSelectors:
+        app.kubernetes.io/component: data-catalog
+        {{- include "common.selectorLabels" . | nindent 8 }}
+
+    - kind: Deployment
+      name: directory-browser
+      namespace: {{ .Release.Namespace }}
+      podSelectors:
+        app.kubernetes.io/component: directory-browser
+        {{- include "common.selectorLabels" . | nindent 8 }}
+
+    - kind: Deployment
+      name: directory-namespace
+      namespace: {{ .Release.Namespace }}
+      podSelectors:
+        app.kubernetes.io/component: directory-namespace
+        {{- include "common.selectorLabels" . | nindent 8 }}
+
+    - kind: Deployment
+      name: directory-schema
+      namespace: {{ .Release.Namespace }}
+      podSelectors:
+        app.kubernetes.io/component: directory-schema
+        {{- include "common.selectorLabels" . | nindent 8 }}
+
+    - kind: Deployment
+      name: iddm-proxy
+      namespace: {{ .Release.Namespace }}
+      podSelectors:
+        app.kubernetes.io/component: iddm-proxy
+        {{- include "common.selectorLabels" . | nindent 8 }}
+
+    - kind: Deployment
+      name: iddm-ui
+      namespace: {{ .Release.Namespace }}
+      podSelectors:
+        app.kubernetes.io/component: iddm-ui
+        {{- include "common.selectorLabels" . | nindent 8 }}
+
+    - kind: Deployment
+      name: settings
+      namespace: {{ .Release.Namespace }}
+      podSelectors:
+        app.kubernetes.io/component: settings
+        {{- include "common.selectorLabels" . | nindent 8 }}
+
+    - kind: Deployment
+      name: system-administration
+      namespace: {{ .Release.Namespace }}
+      podSelectors:
+        app.kubernetes.io/component: system-administration
+        {{- include "common.selectorLabels" . | nindent 8 }}
+
+    - kind: Deployment
+      name: zipkin
+      namespace: {{ .Release.Namespace }}
+      podSelectors:
+        app.kubernetes.io/component: zipkin
+        {{- include "common.selectorLabels" . | nindent 8 }}
+
+    - kind: StatefulSet
+      name: fid
+      namespace: {{ .Release.Namespace }}
+      podSelectors:
+        app.kubernetes.io/core-name: {{ include "fid.name" . }}
+        {{- include "fid.selectorLabels" . | nindent 8 }}
+      claimNames:
+        - r1-pvc
+      pvcLabels:
+        app.kubernetes.io/core-name: {{ include "fid.name" . }}
+        {{- include "fid.selectorLabels" . | nindent 8 }}
+
+    - kind: StatefulSet
+      name: zookeeper
+      namespace: {{ .Release.Namespace }}
+      podSelectors:
+        {{- $subchart := .Subcharts.zookeeper -}}
+        {{- $zk := dict "Chart" $subchart.Chart "Values" $subchart.Values "Release" .Release "Capabilities" .Capabilities -}}
+        {{- include "zookeeper.selectorLabels" $zk | nindent 8 }}
+      claimNames:
+        - zk-pvc
+      pvcLabels:
+        {{- include "zookeeper.selectorLabels" $zk | nindent 8 }}
+{{- end }}

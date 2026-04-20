@@ -1,0 +1,124 @@
+{{- if .Values.preUpgradeChart.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "fid.fullname" . }}-pre-upgrade-chart-job
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+    app.kubernetes.io/core-name: {{ include "fid.name" . }}
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "argocd.argoproj.io/hook": PreSync
+    {{- if .Values.preUpgradeChart.job.delete }}
+    "helm.sh/hook-delete-policy": hook-succeeded,hook-failed,before-hook-creation
+    "argocd.argoproj.io/hook-delete-policy": HookSucceeded,HookFailed,BeforeHookCreation
+    {{- end }}
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: pre-upgrade-chart
+        {{- include "common.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "fid.fullname" . }}-delete-resources-sa
+      restartPolicy: Never
+      volumes:
+        - name: selectors
+          configMap:
+            name: {{ include "fid.fullname" . }}-pre-upgrade-chart
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 6 }}
+      {{- end }}
+      {{- if .Values.podSecurityContext.enabled }}
+      securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.podSecurityContext "context" $) | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: update-immutables
+          {{- if .Values.securityContext.enabled }}
+          securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.securityContext "context" $) | nindent 12 }}
+          {{- end }}
+          image: {{ .Values.preUpgradeChart.image.repository | default "radiantone/kubectl" }}:{{ .Values.preUpgradeChart.image.tag | default "latest" }}
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: selectors
+              mountPath: /etc/selectors
+              readOnly: true
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              SELECTORS_FILE="/etc/selectors/rendered-selectors.yaml"
+
+              if [ ! -f "$SELECTORS_FILE" ]; then
+                echo "❌ File '$SELECTORS_FILE' not found."
+                exit 1
+              fi
+
+              yq e -o=json '.' "$SELECTORS_FILE" | jq -c '.[]' | while read -r obj; do
+                KIND=$(echo "$obj" | jq -r '.kind')
+                NAME=$(echo "$obj" | jq -r '.name')
+                NS=$(echo "$obj" | jq -r '.namespace // "{{ .Release.Namespace }}"')
+
+                DESIRED_SELECTOR=$(echo "$obj" | jq -c '.podSelectors // {}')
+                DESIRED_SORTED=$(echo "$DESIRED_SELECTOR" | jq -c -S .)
+
+                if [ "$KIND" = "Deployment" ]; then
+                  if kubectl get deployment "$NAME" -n "$NS" >/dev/null 2>&1; then
+                    LIVE_SELECTOR=$(kubectl get deployment "$NAME" -n "$NS" -o json | jq -c '.spec.selector.matchLabels // {}')
+                    LIVE_SORTED=$(echo "$LIVE_SELECTOR" | jq -c -S .)
+                    if [ "$LIVE_SORTED" != "$DESIRED_SORTED" ]; then
+                      echo "⚠️ Deployment '$NAME' selector differs → deletion required."
+                      echo "🔵  In cluster (actual labels):"
+                      echo "$LIVE_SORTED" | jq '.' | yq -P | sed 's/^/    /'
+                      echo "🟢  Desired:"
+                      echo "$DESIRED_SORTED" | jq '.' | yq -P | sed 's/^/    /'
+                      kubectl delete deployment "$NAME" -n "$NS" --wait
+                    else
+                      echo "✅ Deployment '$NAME' selector OK"
+                    fi
+                  fi
+                elif [ "$KIND" = "StatefulSet" ]; then
+                  if kubectl get statefulset "$NAME" -n "$NS" >/dev/null 2>&1; then
+                    LIVE_SELECTOR=$(kubectl get statefulset "$NAME" -n "$NS" -o json | jq -c '.spec.selector.matchLabels // {}')
+                    LIVE_SORTED=$(echo "$LIVE_SELECTOR" | jq -c -S .)
+                    if [ "$LIVE_SORTED" != "$DESIRED_SORTED" ]; then
+                      echo "⚠️ StatefulSet '$NAME' selector differs → deletion required."
+                      echo "🔵  In cluster (actual labels):"
+                      echo "$LIVE_SORTED" | jq '.' | yq -P | sed 's/^/    /'
+                      echo "🟢  Desired:"
+                      echo "$DESIRED_SORTED" | jq '.' | yq -P | sed 's/^/    /'
+                      kubectl delete statefulset "$NAME" -n "$NS" --wait
+                    else
+                      echo "✅ StatefulSet '$NAME' selector OK"
+                    fi
+
+                    CLAIMS=$(echo "$obj" | jq -r '.claimNames[]')
+                    LABELS=$(echo "$obj" | jq -c '.pvcLabels // {}')
+                    LABELS_SORTED=$(echo "$LABELS" | jq -c -S .)
+                    
+                    for CLAIM in $CLAIMS; do
+                      PATTERN="^${CLAIM}-${NAME}-[0-9]+$"
+                      PVC_LIST=$(kubectl get pvc -n "$NS" -o json | jq -r '.items[] | select(.metadata.name | test("'"$PATTERN"'")) | .metadata.name')
+                      for PVC in $PVC_LIST; do
+                        CUR_LABELS_RAW=$(kubectl get pvc "$PVC" -n "$NS" -o json | jq -c '.metadata.labels // {}')
+                        CUR_LABELS_SORTED=$(echo "$CUR_LABELS_RAW" | jq -c -S .)
+                        if [ "$CUR_LABELS_SORTED" != "$LABELS_SORTED" ]; then
+                          echo "🧹 Erase all labels on PVC '$PVC' before patch"
+                          kubectl patch pvc "$PVC" -n "$NS" --type=merge -p '{"metadata":{"labels":null}}'
+                          echo "🚧  Patch labels on PVC '$PVC'"
+                          echo "🔵  In cluster (actual labels):"
+                          echo "$CUR_LABELS_SORTED" | jq '.' | yq -P | sed 's/^/    /'
+                          echo "🟢  Desired labels:"
+                          echo "$LABELS_SORTED" | jq '.' | yq -P | sed 's/^/    /'
+                          kubectl patch pvc "$PVC" -n "$NS" --type=merge -p "{\"metadata\":{\"labels\":$LABELS}}"
+                        else
+                          echo "✅ PVC '$PVC' labels OK"
+                        fi
+                      done
+                    done
+                  fi
+                fi
+              done
+{{- end }}

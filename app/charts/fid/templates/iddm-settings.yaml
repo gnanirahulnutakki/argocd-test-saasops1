@@ -1,0 +1,192 @@
+{{- if semverCompare ">=8.1-0" (.Values.image.tag | default .Chart.AppVersion) -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ (.Values.settings).serviceName | default "settings-service" }}
+  labels:
+    app.kubernetes.io/component: settings
+    {{- include "common.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/component: settings
+    {{- include "common.selectorLabels" . | nindent 4 }}
+  ports:
+    - port: 80
+      name: http
+      targetPort: 8991
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: settings
+  labels:
+    app.kubernetes.io/component: settings
+    {{- include "common.labels" . | nindent 4 }}
+spec:
+  strategy:
+    type: RollingUpdate
+    # rollingUpdate:
+      # maxSurge: 1
+      # maxUnavailable: 1
+  revisionHistoryLimit: {{ (.Values.settings).revisionHistoryLimit | default 2 }}
+  {{- if gt (.Values.replicaCount | int) 0}}
+  replicas: {{ (.Values.global.hibernate | default false) | ternary 0 (.Values.settings).replicas }}
+  {{- else }}
+  replicas: 0
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: settings
+      {{- include "common.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/config-promotion-secrets.yaml") . | sha256sum }}
+        {{- include "logging.annotations" (dict "component" .Values.settings "context" .) | nindent 8 }}
+      {{- if .Values.settings.podAnnotations }}
+        {{- with .Values.settings.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/component: settings
+        {{- include "common.selectorLabels" . | nindent 8 }}
+        {{- include "iddm.podLabels" (dict "component" .Values.settings "context" .) | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 6 }}
+      {{- end }}
+      {{- if .Values.podSecurityContext.enabled }}
+      securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.podSecurityContext "context" $) | nindent 8 }}
+      {{- end }}
+      {{- if (.Values.settings).initEnabled }}
+      initContainers:
+        - name: check-fid
+          image: alpine:latest
+          imagePullPolicy: IfNotPresent
+          {{- if .Values.securityContext.enabled }}
+          securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.securityContext "context" $) | nindent 12 }}
+          {{- end }}
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          command: ['sh', '-c', 'until nc -w 2 -z $0 $1; do echo Waiting for FID -- $0:$1;sleep 2; done; echo Connection to FID ok -- $0:$1', '{{ include "fid.fullname" . }}-app', '2636']
+      {{- end }}
+      containers:
+        - name: settings
+          image: "{{ ((.Values.settings).image).repository | default "radiantone/iddm-settings" }}:{{ ((.Values.settings).image).tag | default .Chart.AppVersion }}"
+          imagePullPolicy: Always
+          {{- if .Values.securityContext.enabled }}
+          securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.securityContext "context" $) | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml (.Values.settings).resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8991
+              scheme: HTTP
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 10
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8991
+              scheme: HTTP
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 10
+          envFrom:
+            {{- include "fid.auto_config.promotion.settings_env_from" . | nindent 12 }}
+            - secretRef:
+                name: api-secrets
+          env:
+          {{- include "zipkin.v8.env" . | nindent 12 }}
+          {{- include "fid.v8.zk_values" . | nindent 12 }}
+            - name: IDDM_TENANT
+              valueFrom:
+                configMapKeyRef:
+                  key: ZK_CLUSTER
+                  name: {{ template "fid.fullname" . }}
+          {{- if .Values.sentryDSN }}
+            - name: SENTRY_DSN
+              value: {{ .Values.sentryDSN }}
+            - name: SENTRY_ENABLED
+              value: "true"
+          {{- end }}
+          {{- if .Values.fid.adminApiKey }}
+            - name: IDDM_API_KEY
+              value: {{ .Values.fid.adminApiKey }}
+          {{- else }}
+            - name: IDDM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: fid-admin-api-key
+                  name: rootcreds-{{ template "fid.fullname" . }}
+                  optional: true
+          {{- end }}          
+          {{- if .Values.httpRequestTimeout }}
+            - name: HTTP_REQUEST_TIMEOUT
+              value: "{{ .Values.httpRequestTimeout }}"
+          {{- end }}
+          # Add aditional env variables
+          {{- range $key, $value := (.Values.settings).env }}
+            - name: {{ tpl $key $ }}
+              value: {{ tpl (print $value) $ | quote }}
+          {{- end }}
+          # Add aditional global env variables
+          {{- range $key, $value := (.Values.global).env }}
+            - name: {{ tpl $key $ }}
+              value: {{ tpl (print $value) $ | quote }}
+          {{- end }}          
+          ports:
+          - containerPort: 8991
+            name: http
+            protocol: TCP
+          volumeMounts:
+            {{- include "fid.auto_config.promotion.volume_mounts" . | nindent 12 -}}
+      {{- if .Values.nodeSelector }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- else }}
+      {{- with .Values.global.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      {{- if .Values.tolerations }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- else }}
+      {{- with .Values.global.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      {{- if (.Values.settings).affinity }}
+      {{- with (.Values.settings).affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- else }}
+      {{- with .Values.global.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      volumes:
+        {{- include "fid.auto_config.promotion.volumes" . | nindent 8 -}}
+{{- end }}

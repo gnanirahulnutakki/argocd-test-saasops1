@@ -1,0 +1,121 @@
+{{- if semverCompare ">=8.1-0" (.Values.image.tag | default .Chart.AppVersion) -}}
+{{- if .Values.zipkin.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ (.Values.zipkin).serviceName | default "zipkin-service" }}
+  labels:
+    app.kubernetes.io/component: zipkin
+    {{- include "common.labels" . | nindent 4 }}
+spec:
+  type: {{ ((.Values.zipkin).service).type | default "ClusterIP" }}
+  selector:
+    app.kubernetes.io/component: zipkin
+    {{- include "common.selectorLabels" . | nindent 4 }}
+  ports:
+    - protocol: TCP
+      port: {{ ((.Values.zipkin).service).port | default 9411}}
+      targetPort: 9411
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zipkin
+  labels:
+    app.kubernetes.io/component: zipkin
+    {{- include "common.labels" . | nindent 4 }}
+spec:
+  strategy:
+    type: RollingUpdate
+    # rollingUpdate:
+      # maxSurge: 1
+      # maxUnavailable: 1
+  revisionHistoryLimit: {{ (.Values.zipkin).revisionHistoryLimit | default 2 }}
+  {{- if gt (.Values.replicaCount | int) 0}}
+  replicas: {{ (.Values.global.hibernate | default false) | ternary 0 (.Values.zipkin).replicas }}
+  {{- else }}
+  replicas: 0
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: zipkin
+      {{- include "common.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- if .Values.zipkin.podAnnotations }}
+      annotations:
+        {{- with .Values.zipkin.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/component: zipkin
+        {{- include "common.selectorLabels" . | nindent 8 }}
+        {{- include "iddm.podLabels" (dict "component" .Values.zipkin "context" .) | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 6 }}
+      {{- end }}
+      {{- if .Values.podSecurityContext.enabled }}
+      securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.podSecurityContext "context" $) | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: zipkin
+          image: {{ ((.Values.zipkin).image).repository | default "openzipkin/zipkin" }}:{{ ((.Values.zipkin).image).tag | default "latest" }}
+          imagePullPolicy: Always
+          {{- if .Values.securityContext.enabled }}
+          securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.securityContext "context" $) | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml (.Values.zipkin).resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 9411
+            initialDelaySeconds: 60
+            periodSeconds: 60
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 9411
+            initialDelaySeconds: 60
+            periodSeconds: 60
+          ports:
+            - containerPort: 9411
+      restartPolicy: Always
+      {{- if .Values.nodeSelector }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- else }}
+      {{- with .Values.global.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      {{- if .Values.tolerations }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- else }}
+      {{- with .Values.global.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      {{- if (.Values.zipkin).affinity }}
+      {{- with (.Values.zipkin).affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- else }}
+      {{- with .Values.global.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+{{- end }}
+{{- end }}

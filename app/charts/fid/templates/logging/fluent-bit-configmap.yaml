@@ -1,0 +1,432 @@
+{{- if and (hasKey .Values "fluent-bit") (eq (index .Values "fluent-bit" "enabled") true) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+data:
+  fluent-bit.conf: |
+{{- $fluentBit := index .Values "fluent-bit" | default dict }}
+    [SERVICE]
+        Daemon Off
+        Flush {{ $fluentBit.flush | default 1 }}
+        Log_Level {{ $fluentBit.logLevel | default "info" }}
+        Parsers_File parsers.conf
+        Parsers_File custom_parsers.conf
+        HTTP_Server On
+        HTTP_Listen 0.0.0.0
+        HTTP_Port {{ $fluentBit.metricsPort | default 2020 }}
+        Health_Check On
+{{- $clusterName := .Values.zk.clusterName | default "fid-cluster" }}
+{{- with $fluentBit.logs }}
+    {{- range . }}
+    {{- if .enable }}
+    
+    # Input for {{ .name }}
+    [INPUT]
+        Name              tail
+        Tag               kube.var.log.containers.{{ .name }}.*
+        Path              {{ .path }}
+        Exclude_Path      /var/log/containers/kube-*,/var/log/containers/*node*,/var/log/containers/*logstash*,/var/log/containers/fluent-bit*,/var/log/containers/aws-node*
+        Parser            cri
+        DB                /var/log/flb_{{ .name }}.db
+        Skip_Long_Lines   On
+        Refresh_Interval  {{ .refresh_interval | default 10 }}
+    
+    # Kubernetes filter for {{ .name }} - enriches with metadata
+    {{- if $fluentBit.kubernetesFilter }}
+    {{- if $fluentBit.kubernetesFilter.enabled }}
+    [FILTER]
+        Name                kubernetes
+        Match               kube.var.log.containers.{{ .name }}.*
+        Kube_Tag_Prefix     kube.var.log.containers.{{ .name }}.
+        Kube_URL            {{ $fluentBit.kubernetesFilter.kubeURL | default "https://kubernetes.default.svc:443" }}
+        Kube_CA_File        {{ $fluentBit.kubernetesFilter.caFile | default "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt" }}
+        Kube_Token_File     {{ $fluentBit.kubernetesFilter.tokenFile | default "/var/run/secrets/kubernetes.io/serviceaccount/token" }}
+        Merge_Log           {{ $fluentBit.kubernetesFilter.mergeLog | default "On" }}
+        K8S-Logging.Parser  {{ $fluentBit.kubernetesFilter.parser | default "On" }}
+        K8S-Logging.Exclude {{ $fluentBit.kubernetesFilter.exclude | default "On" }}
+        Keep_Log            {{ $fluentBit.kubernetesFilter.keepLog | default "On" }}
+    {{- end }}
+    {{- else }}
+    # Default Kubernetes filter
+    [FILTER]
+        Name                kubernetes
+        Match               kube.var.log.containers.{{ .name }}.*
+        Kube_Tag_Prefix     kube.var.log.containers.{{ .name }}.
+        Kube_URL            https://kubernetes.default.svc:443
+        Merge_Log           On
+        K8S-Logging.Parser  On
+        K8S-Logging.Exclude On
+        Keep_Log            On
+    {{- end }}
+    
+    # Record modifier filter for {{ .name }}
+    [FILTER]
+        Name record_modifier
+        Match kube.var.log.containers.{{ .name }}.*
+        Record clustername {{ $clusterName }}
+        Record component {{ .name }}
+        Record environment {{ $.Values.global.environment | default "default" }}
+    
+    # Parser filter for {{ .name }}
+    [FILTER]
+        Name parser
+        Match kube.var.log.containers.{{ .name }}.*
+        Parser json
+        Key_Name message
+        Reserve_Data on
+    
+    {{- end }}
+    {{- end }}
+{{- end }}
+
+    # ===== AGGREGATOR CONFIGURATIONS =====
+    
+{{- if and $fluentBit.aggregators (kindIs "slice" $fluentBit.aggregators) }}
+    # ===== NEW MULTI-AGGREGATOR CONFIGURATION =====
+    # Multiple aggregators can be configured and logs can be routed to specific aggregators
+    
+{{- range $aggregator := $fluentBit.aggregators }}
+    {{- if eq $aggregator.type "elasticsearch" }}
+    # Elasticsearch Aggregator: {{ $aggregator.name }}
+    {{- range $logName := $fluentBit.logs }}
+    {{- if .enable }}
+    {{- $sendToAll := not (hasKey . "aggregators") }}
+    {{- if or $sendToAll (and (kindIs "slice" .aggregators) (has $aggregator.name .aggregators)) }}
+    [OUTPUT]
+        Name               es
+        Match              kube.var.log.containers.{{ $logName.name }}.*
+        Host               {{ $aggregator.host }}
+        Port               {{ $aggregator.port | default 9200 }}
+        {{- if $aggregator.username }}
+        HTTP_User          {{ $aggregator.username }}
+        {{- end }}
+        {{- if $aggregator.password }}
+        HTTP_Passwd        {{ $aggregator.password }}
+        {{- end }}
+        {{- if $aggregator.tls }}
+        TLS                On
+        {{- end }}
+        {{- if $aggregator.tlsVerify }}
+        TLS.Verify         On
+        {{- end }}
+        Index              {{ $aggregator.index | default "fluent-bit" }}
+        Type               {{ $aggregator.docType | default "_doc" }}
+        {{- if $aggregator.logstashFormat }}
+        Logstash_Format    On
+        Logstash_Prefix    {{ $aggregator.logstashPrefix | default $logName.name }}
+        Logstash_DateFormat {{ $aggregator.logstashDateFormat | default "%Y.%m.%d" }}
+        {{- else }}
+        Logstash_Format    Off
+        {{- end }}
+        Retry_Limit        {{ if $aggregator.retryLimit }}{{ $aggregator.retryLimit }}{{ else }}False{{ end }}
+        Replace_Dots       On
+        Trace_Error        On
+        Suppress_Type_Name On
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    
+    {{- if eq $aggregator.type "opensearch" }}
+    # OpenSearch Aggregator: {{ $aggregator.name }}
+    {{- range $logName := $fluentBit.logs }}
+    {{- if .enable }}
+    {{- $sendToAll := not (hasKey . "aggregators") }}
+    {{- if or $sendToAll (and (kindIs "slice" .aggregators) (has $aggregator.name .aggregators)) }}
+    [OUTPUT]
+        Name               opensearch
+        Match              kube.var.log.containers.{{ $logName.name }}.*
+        Host               {{ $aggregator.host }}
+        Port               {{ $aggregator.port | default 9200 }}
+        {{- if $aggregator.username }}
+        HTTP_User          {{ $aggregator.username }}
+        {{- end }}
+        {{- if $aggregator.password }}
+        HTTP_Passwd        {{ $aggregator.password }}
+        {{- end }}
+        {{- if $aggregator.awsAuth }}
+        AWS_Auth           On
+        AWS_Region         {{ $aggregator.awsRegion }}
+        {{- end }}
+        {{- if $aggregator.tls }}
+        TLS                On
+        {{- end }}
+        {{- if $aggregator.tlsVerify }}
+        TLS.Verify         On
+        {{- end }}
+        Index              {{ $aggregator.index | default "fluent-bit" }}
+        Type               {{ $aggregator.docType | default "_doc" }}
+        {{- if $aggregator.logstashFormat }}
+        Logstash_Format    On
+        Logstash_Prefix    {{ $aggregator.logstashPrefix | default $logName.name }}
+        Logstash_DateFormat {{ $aggregator.logstashDateFormat | default "%Y.%m.%d" }}
+        {{- else }}
+        Logstash_Format    Off
+        {{- end }}
+        Retry_Limit        {{ if $aggregator.retryLimit }}{{ $aggregator.retryLimit }}{{ else }}False{{ end }}
+        Replace_Dots       On
+        Trace_Error        On
+        Suppress_Type_Name On
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    
+    {{- if eq $aggregator.type "loki" }}
+    # Loki Aggregator: {{ $aggregator.name }}
+    {{- range $logName := $fluentBit.logs }}
+    {{- if .enable }}
+    {{- $sendToAll := not (hasKey . "aggregators") }}
+    {{- if or $sendToAll (and (kindIs "slice" .aggregators) (has $aggregator.name .aggregators)) }}
+    [OUTPUT]
+        Name               loki
+        Match              kube.var.log.containers.{{ $logName.name }}.*
+        Host               {{ $aggregator.host }}
+        Port               {{ $aggregator.port | default 3100 }}
+        {{- if $aggregator.tenantId }}
+        Tenant_ID          {{ $aggregator.tenantId }}
+        {{- end }}
+        Labels             component={{ $logName.name }},cluster={{ $clusterName }},{{ $aggregator.labels | default "job=fluent-bit" }}
+        Auto_Kubernetes_Labels {{ if $aggregator.autoKubernetesLabels }}On{{ else }}Off{{ end }}
+        {{- if $aggregator.username }}
+        Http_User          {{ $aggregator.username }}
+        {{- end }}
+        {{- if $aggregator.password }}
+        Http_Passwd        {{ $aggregator.password }}
+        {{- end }}
+        {{- if $aggregator.tls }}
+        TLS                On
+        {{- end }}
+        {{- if $aggregator.tlsVerify }}
+        TLS.Verify         On
+        {{- end }}
+        Line_Format        {{ $aggregator.lineFormat | default "json" }}
+        Remove_Keys        {{ $aggregator.removeKeys | default "kubernetes,stream" }}
+        Retry_Limit        {{ if $aggregator.retryLimit }}{{ $aggregator.retryLimit }}{{ else }}False{{ end }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    
+    {{- if eq $aggregator.type "splunk" }}
+    # Splunk Aggregator: {{ $aggregator.name }}
+    {{- range $logName := $fluentBit.logs }}
+    {{- if .enable }}
+    {{- $sendToAll := not (hasKey . "aggregators") }}
+    {{- if or $sendToAll (and (kindIs "slice" .aggregators) (has $aggregator.name .aggregators)) }}
+    [OUTPUT]
+        Name               splunk
+        Match              kube.var.log.containers.{{ $logName.name }}.*
+        Host               {{ $aggregator.host }}
+        Port               {{ $aggregator.port | default 8088 }}
+        Splunk_Token       {{ $aggregator.token }}
+        {{- if $aggregator.index }}
+        Event_Index        {{ $aggregator.index }}
+        {{- end }}
+        {{- if $aggregator.source }}
+        Event_Source       {{ $aggregator.source }}
+        {{- else }}
+        Event_Source       {{ $logName.name }}
+        {{- end }}
+        {{- if $aggregator.sourcetype }}
+        Event_Sourcetype   {{ $aggregator.sourcetype }}
+        {{- end }}
+        {{- if $aggregator.tls }}
+        TLS                On
+        {{- end }}
+        {{- if $aggregator.tlsVerify }}
+        TLS.Verify         On
+        {{- end }}
+        Retry_Limit        {{ if $aggregator.retryLimit }}{{ $aggregator.retryLimit }}{{ else }}False{{ end }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    
+    {{- if eq $aggregator.type "sumologic" }}
+    # Sumo Logic Aggregator: {{ $aggregator.name }}
+    {{- range $logName := $fluentBit.logs }}
+    {{- if .enable }}
+    {{- $sendToAll := not (hasKey . "aggregators") }}
+    {{- if or $sendToAll (and (kindIs "slice" .aggregators) (has $aggregator.name .aggregators)) }}
+    [OUTPUT]
+        Name               http
+        Match              kube.var.log.containers.{{ $logName.name }}.*
+        Host               {{ $aggregator.host | default "collectors.sumologic.com" }}
+        Port               {{ $aggregator.port | default 443 }}
+        URI                {{ $aggregator.uri }}
+        Format             json
+        Json_date_key      timestamp
+        Json_date_format   iso8601
+        Header             X-Sumo-Category {{ $aggregator.category | default $logName.name }}
+        Header             X-Sumo-Name {{ $aggregator.sourceName | default $logName.name }}
+        Header             X-Sumo-Host {{ $aggregator.hostname | default "${HOSTNAME}" }}
+        {{- if $aggregator.tls }}
+        TLS                On
+        {{- end }}
+        {{- if $aggregator.tlsVerify }}
+        TLS.Verify         On
+        {{- end }}
+        Retry_Limit        {{ if $aggregator.retryLimit }}{{ $aggregator.retryLimit }}{{ else }}False{{ end }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    
+    {{- if eq $aggregator.type "s3" }}
+    # AWS S3 Aggregator: {{ $aggregator.name }}
+    {{- range $logName := $fluentBit.logs }}
+    {{- if .enable }}
+    {{- $sendToAll := not (hasKey . "aggregators") }}
+    {{- if or $sendToAll (and (kindIs "slice" .aggregators) (has $aggregator.name .aggregators)) }}
+    [OUTPUT]
+        Name               s3
+        Match              kube.var.log.containers.{{ $logName.name }}.*
+        Bucket             {{ $aggregator.bucket }}
+        Region             {{ $aggregator.region }}
+        {{- if $aggregator.prefix }}
+        S3_Key_Format      {{ $aggregator.prefix }}/{{ $logName.name }}/%Y/%m/%d/%{hostname}_%{time:yyyyMMdd-HHmmss}_$INDEX.json
+        {{- else }}
+        S3_Key_Format      fluent-bit-logs/{{ $logName.name }}/%Y/%m/%d/%{hostname}_%{time:yyyyMMdd-HHmmss}_$INDEX.json
+        {{- end }}
+        {{- if $aggregator.roleArn }}
+        Role_Arn           {{ $aggregator.roleArn }}
+        {{- end }}
+        Total_File_Size    {{ $aggregator.totalFileSize | default "50M" }}
+        Upload_Timeout     {{ $aggregator.uploadTimeout | default "10m" }}
+        Use_Put_Object     {{ if $aggregator.usePutObject }}On{{ else }}Off{{ end }}
+        Retry_Limit        {{ if $aggregator.retryLimit }}{{ $aggregator.retryLimit }}{{ else }}False{{ end }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    
+    {{- if eq $aggregator.type "kafka" }}
+    # Kafka Aggregator: {{ $aggregator.name }}
+    {{- range $logName := $fluentBit.logs }}
+    {{- if .enable }}
+    {{- $sendToAll := not (hasKey . "aggregators") }}
+    {{- if or $sendToAll (and (kindIs "slice" .aggregators) (has $aggregator.name .aggregators)) }}
+    [OUTPUT]
+        Name               kafka
+        Match              kube.var.log.containers.{{ $logName.name }}.*
+        Brokers            {{ $aggregator.brokers }}
+        Topics             {{ $aggregator.topics | default $logName.name }}
+        {{- if $aggregator.messageKey }}
+        Message_Key        {{ $aggregator.messageKey }}
+        {{- end }}
+        {{- if $aggregator.timestampKey }}
+        Timestamp_Key      {{ $aggregator.timestampKey }}
+        {{- end }}
+        Format             json
+        Retry_Limit        {{ if $aggregator.retryLimit }}{{ $aggregator.retryLimit }}{{ else }}False{{ end }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    
+    {{- if eq $aggregator.type "stdout" }}
+    # Standard Output Aggregator: {{ $aggregator.name }} (for debugging)
+    {{- range $logName := $fluentBit.logs }}
+    {{- if .enable }}
+    {{- $sendToAll := not (hasKey . "aggregators") }}
+    {{- if or $sendToAll (and (kindIs "slice" .aggregators) (has $aggregator.name .aggregators)) }}
+    [OUTPUT]
+        Name               stdout
+        Match              kube.var.log.containers.{{ $logName.name }}.*
+        Format             {{ $aggregator.format | default "json_lines" }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    
+{{- end }}
+
+{{- else if and $fluentBit.outputSearchHost $fluentBit.outputSearchType }}
+    # ===== LEGACY SINGLE AGGREGATOR CONFIGURATION =====
+    # Using backward-compatible single aggregator format
+    {{- range $logName := $fluentBit.logs }}
+    {{- if .enable }}
+    
+    # Kubernetes filter for {{ $logName.name }} (legacy mode)
+    {{- if $fluentBit.kubernetesFilter }}
+    {{- if $fluentBit.kubernetesFilter.enabled }}
+    [FILTER]
+        Name                kubernetes
+        Match               kube.var.log.containers.{{ $logName.name }}.*
+        Kube_Tag_Prefix     kube.var.log.containers.{{ $logName.name }}.
+        Kube_URL            {{ $fluentBit.kubernetesFilter.kubeURL | default "https://kubernetes.default.svc:443" }}
+        Merge_Log           On
+        K8S-Logging.Parser  On
+        K8S-Logging.Exclude On
+        Keep_Log            On
+    {{- end }}
+    {{- else }}
+    # Default Kubernetes filter (legacy mode)
+    [FILTER]
+        Name                kubernetes
+        Match               kube.var.log.containers.{{ $logName.name }}.*
+        Kube_Tag_Prefix     kube.var.log.containers.{{ $logName.name }}.
+        Kube_URL            https://kubernetes.default.svc:443
+        Merge_Log           On
+        K8S-Logging.Parser  On
+        K8S-Logging.Exclude On
+        Keep_Log            On
+    {{- end }}
+    
+    [OUTPUT]
+        Name               {{ $fluentBit.outputSearchType }}
+        Match              kube.var.log.containers.{{ $logName.name }}.*
+        Host               {{ $fluentBit.outputSearchHost }}
+        Port               {{ $fluentBit.outputSearchPort | default 9200 }}
+        {{- if eq $fluentBit.outputSearchType "es" }}
+        Index              {{ $fluentBit.outputSearchIndex | default "fluent-bit" }}
+        Type               {{ $fluentBit.outputSearchDocType | default "_doc" }}
+        {{- if $fluentBit.outputSearchLogstashFormat }}
+        Logstash_Format    On
+        Logstash_Prefix    {{ $fluentBit.outputSearchLogstashPrefix | default $logName.name }}
+        Logstash_DateFormat {{ $fluentBit.outputSearchLogstashDateFormat | default "%Y.%m.%d" }}
+        {{- else }}
+        Logstash_Format    Off
+        {{- end }}
+        {{- else if eq $fluentBit.outputSearchType "opensearch" }}
+        Index              {{ $fluentBit.outputSearchIndex | default "fluent-bit" }}
+        Type               {{ $fluentBit.outputSearchDocType | default "_doc" }}
+        {{- if $fluentBit.outputSearchLogstashFormat }}
+        Logstash_Format    On
+        Logstash_Prefix    {{ $fluentBit.outputSearchLogstashPrefix | default $logName.name }}
+        Logstash_DateFormat {{ $fluentBit.outputSearchLogstashDateFormat | default "%Y.%m.%d" }}
+        {{- else }}
+        Logstash_Format    Off
+        {{- end }}
+        {{- else if eq $fluentBit.outputSearchType "loki" }}
+        Labels             cluster={{ $clusterName }},component={{ $logName.name }}
+        {{- end }}
+        Retry_Limit        False
+        Replace_Dots       On
+        Trace_Error        On
+        {{- if eq $fluentBit.outputSearchType "es" }}
+        Suppress_Type_Name On
+        {{- end }}
+    {{- end }}
+    {{- end }}
+{{- end }}
+
+  custom_parsers.conf: |
+    [PARSER]
+        Name docker_no_time
+        Format json
+        Time_Keep Off
+        Time_Key time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L
+    
+    [PARSER]
+        Name cri
+        Format regex
+        Regex ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<message>.*)$
+        Time_Key time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+{{- end }}

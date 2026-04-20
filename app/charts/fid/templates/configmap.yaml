@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+  name: {{ template "fid.fullname" . }}
+data:
+  {{- if .Values.zk.external }}
+  ZK: "external"
+  {{- end }}
+  ZK_CONN_STR: {{ .Values.zk.connectionString | quote }} #this should match the service name from zk deployment
+  ZK_CLUSTER: {{ .Values.zk.clusterName | quote }}
+  {{- if .Values.fid.readonly }}
+  NODE_TYPE: "follower"
+  {{- end }}
+  IDDM_SERVICE_ACCOUNT_USERNAME: "cn=api-service-user,ou=ServiceUsers,cn=config"
+{{- if (.Values.fid.migration).file }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ template "fid.fullname" . }}-migration
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+binaryData:
+  export.zip: {{ .Values.fid.migration.file | b64enc }}
+immutable: true
+{{- end }}
+{{- if .Values.autoConfigPromotion.enabled }}
+---
+{{- include "fid.auto_config.promotion.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: "{{- include "fid.auto_config.promotion.config_map_name" . -}}"
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+data:
+  GIT_DIRECTORY: "{{ .Values.autoConfigPromotion.volumeMountPath }}"
+  GIT_REPO: "{{ .Values.autoConfigPromotion.git.repository }}"
+  GIT_EXPORT_TO_BRANCH: "{{ (.Values.autoConfigPromotion.git.exportTo | default dict).branch }}"
+  GIT_IMPORT_FROM_BRANCH: "{{ (.Values.autoConfigPromotion.git.importFrom | default dict).branch }}"
+{{- end }}

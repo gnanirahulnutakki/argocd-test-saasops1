@@ -1,0 +1,51 @@
+{{/*
+=============================================================================
+HDAP Migration Role
+-----------------------------------------------------------------------------
+Narrow, namespace-scoped permissions for the three migration Jobs.
+
+  configmaps                — read/create/update the migration sentinel
+  pods                      — create/monitor the export worker pod
+  pods/exec, pods/log       — kubectl exec for leader check, kubectl logs -f
+                              for streaming worker output
+  persistentvolumeclaims    — delete follower PVCs (Job 3)
+  statefulsets              — scale FID STS to 0 (Job 1)
+  statefulsets/scale        — the scale subresource kubectl uses
+  serviceaccounts (get)     — fetch the SA UID for sentinel ownerReferences
+                              (Jobs only read their own SA, no create/update)
+=============================================================================
+*/}}
+{{- $targetTag := (.Values.image.tag | default .Chart.AppVersion) -}}
+{{- $targetMajor := (index (splitList "." (index (splitList "-" $targetTag) 0)) 0) -}}
+{{- if eq $targetMajor "9" }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "fid.fullname" . }}-hdap-migration-role
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hdap-migration
+  annotations:
+    "helm.sh/hook": pre-upgrade,pre-install
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+    "argocd.argoproj.io/hook": PreSync
+    "argocd.argoproj.io/sync-wave": "-5"
+    "argocd.argoproj.io/hook-delete-policy": BeforeHookCreation
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "pods", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/log"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets/scale"]
+    verbs: ["get", "patch", "update"]
+{{- end }}

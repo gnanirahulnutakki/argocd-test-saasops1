@@ -1,0 +1,199 @@
+{{- if semverCompare ">=8.1-0" (.Values.image.tag | default .Chart.AppVersion) -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ (.Values.directoryBrowser).serviceName | default "directory-browser-service" }}
+  labels:
+    app.kubernetes.io/component: directory-browser
+    {{- include "common.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/component: directory-browser
+    {{- include "common.selectorLabels" . | nindent 4 }}
+  ports:
+    - port: 80
+      name: http
+      targetPort: 8998
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: directory-browser
+  labels:
+    app.kubernetes.io/component: directory-browser
+    {{- include "common.labels" . | nindent 4 }}
+spec:
+  strategy:
+    type: RollingUpdate
+    # rollingUpdate:
+      # maxSurge: 1
+      # maxUnavailable: 1
+  revisionHistoryLimit: {{ (.Values.dierctoryBrowser).revisionHistoryLimit | default 2 }}
+  {{- if gt (.Values.replicaCount | int) 0}}
+  replicas: {{ (.Values.global.hibernate | default false) | ternary 0 (.Values.directoryBrowser).replicas }}
+  {{- else }}
+  replicas: 0
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: directory-browser
+      {{- include "common.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- $logAnnotations := include "logging.annotations" (dict "component" .Values.directoryBrowser "context" .) -}}
+      {{- if or $logAnnotations .Values.directoryBrowser.podAnnotations }}
+      annotations:
+        {{- $logAnnotations | nindent 8 }}
+        {{- with .Values.directoryBrowser.podAnnotations }}
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/component: directory-browser
+        {{- include "common.selectorLabels" . | nindent 8 }}
+        {{- include "iddm.podLabels" (dict "component" .Values.directoryBrowser "context" .) | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 6 }}
+      {{- end }}
+      {{- if .Values.podSecurityContext.enabled }}
+      securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.podSecurityContext "context" $) | nindent 8 }}
+      {{- end }}
+      {{- if (.Values.directoryBrowser).initEnabled }}
+      initContainers:
+        - name: check-fid
+          image: alpine:latest
+          imagePullPolicy: IfNotPresent
+          {{- if .Values.securityContext.enabled }}
+          securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.securityContext "context" $) | nindent 12 }}
+          {{- end }}
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          command: ['sh', '-c', 'until nc -w 2 -z $0 $1; do echo Waiting for FID -- $0:$1;sleep 2; done; echo Connection to FID ok -- $0:$1', '{{ include "fid.fullname" . }}-app', '2636']
+      {{- end }}
+      containers:
+        - name: directory-browser
+          image: "{{ ((.Values.directoryBrowser).image).repository | default "radiantone/iddm-directory-browser" }}:{{ ((.Values.directoryBrowser).image).tag | default .Chart.AppVersion }}"
+          imagePullPolicy: Always
+          {{- if .Values.securityContext.enabled }}
+          securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.securityContext "context" $) | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml (.Values.directoryBrowser).resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8998
+              scheme: HTTP
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8998
+              scheme: HTTP
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 10
+          envFrom:
+            - secretRef:
+                name: api-secrets
+          env:
+          {{- include "zipkin.v8.env" . | nindent 12 }}
+          {{- include "fid.v8.zk_values" . | nindent 12 }}
+          {{- if .Values.fid.adminApiKey }}          
+            - name: IDDM_API_KEY
+              value: {{ .Values.fid.adminApiKey }}
+            - name: IDDM_SERVICE_ACCOUNT_PASSWORD
+              value: {{ .Values.fid.adminApiKey }}
+          {{- else }}
+            - name: IDDM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: fid-admin-api-key
+                  name: rootcreds-{{ template "fid.fullname" . }}
+                  optional: true
+            - name: IDDM_SERVICE_ACCOUNT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: fid-admin-api-key
+                  name: rootcreds-{{ template "fid.fullname" . }}
+                  optional: true
+          {{- end }}
+            - name: IDDM_TENANT
+              valueFrom:
+                configMapKeyRef:
+                  key: ZK_CLUSTER
+                  name: {{ template "fid.fullname" . }}
+            - name: IDDM_SERVICE_ACCOUNT_USERNAME
+              valueFrom:
+                configMapKeyRef:
+                  key: IDDM_SERVICE_ACCOUNT_USERNAME
+                  name: {{ template "fid.fullname" . }}
+          {{- if .Values.sentryDSN }}
+            - name: SENTRY_DSN
+              value: {{ .Values.sentryDSN }}
+            - name: SENTRY_ENABLED
+              value: "true"
+          {{- end }}
+          {{- if .Values.httpRequestTimeout }}
+            - name: HTTP_REQUEST_TIMEOUT
+              value: "{{ .Values.httpRequestTimeout }}"
+          {{- end }}
+          # Add aditional env variables
+          {{- range $key, $value := (.Values.directoryBrowser).env }}
+            - name: {{ tpl $key $ }}
+              value: {{ tpl (print $value) $ | quote }}
+          {{- end }}
+          # Add aditional global env variables
+          {{- range $key, $value := (.Values.global).env }}
+            - name: {{ tpl $key $ }}
+              value: {{ tpl (print $value) $ | quote }}
+          {{- end }}          
+          ports:
+          - containerPort: 8998
+            name: http
+            protocol: TCP
+      {{- if .Values.nodeSelector }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- else }}
+      {{- with .Values.global.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      {{- if .Values.tolerations }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- else }}
+      {{- with .Values.global.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      {{- if (.Values.directoryBrowser).affinity }}
+      {{- with (.Values.directoryBrowser).affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- else }}
+      {{- with .Values.global.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+{{- end }}

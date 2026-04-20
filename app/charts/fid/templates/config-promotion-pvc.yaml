@@ -1,0 +1,18 @@
+{{- if .Values.autoConfigPromotion.enabled }}
+{{- include "fid.auto_config.promotion.validate" . -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: "{{- include "fid.auto_config.promotion.pvc_name" . }}"
+  namespace: {{ .Release.Namespace }}
+  annotations: {{ .Values.autoConfigPromotion.persistence.annotations | toYaml }}
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: "{{ .Values.autoConfigPromotion.persistence.storageClass }}"
+  resources:
+    requests:
+      storage: {{ .Values.autoConfigPromotion.persistence.size }}
+{{- end }}

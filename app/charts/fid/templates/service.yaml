@@ -1,0 +1,47 @@
+# LDAP and Rest service
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fid.fullname" . }}-app
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+  {{- with ((.Values.service).app).annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ports:
+    - port: 2389
+      name: ldap
+    - port: 2636
+      name: ldaps
+    - port: 8089
+      name: http
+    - port: 8090
+      name: https
+  selector:
+    app.kubernetes.io/core-name: {{ include "fid.name" . }}
+    {{- include "fid.selectorLabels" . | nindent 4 }}
+  type: {{ default "ClusterIP" .Values.service.type }}
+---
+# Admin service
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fid.fullname" . }}-admin
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+  {{- with ((.Values.service).admin).annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ports:
+    - port: 9100
+      name: http
+    - port: 9101
+      name: https
+  selector:
+    app.kubernetes.io/core-name: {{ include "fid.name" . }}
+    {{- include "fid.selectorLabels" . | nindent 4 }}
+  type: ClusterIP

@@ -1,0 +1,52 @@
+{{- if .Values.istio.enabled }}
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: {{ include "fid.fullname" . }}-gateway
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+spec:
+  # selector:
+    # istio: ingressgateway
+  {{- with .Values.istio.gateway.selector }}
+  selector:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  servers:
+  - port:
+      number: {{ .Values.istio.gateway.http.iddm.port }}
+      name: {{ .Values.istio.gateway.http.iddm.name }}
+      protocol: HTTP
+    hosts:
+    {{- range .Values.istio.gateway.hosts }}
+      - {{ . }}
+    {{- end }}
+  - port:
+      number: {{ .Values.istio.gateway.https.iddm.port }} 
+      name: {{ .Values.istio.gateway.https.iddm.name }}
+      protocol: HTTPS
+    hosts:
+    {{- range .Values.istio.gateway.hosts }}
+      - {{ . }}
+    {{- end }}
+    tls:
+      mode: PASSTHROUGH
+  - port:
+      number: {{ .Values.istio.gateway.ldaps.port }}
+      name: {{ .Values.istio.gateway.ldaps.name }}
+      protocol: TLS
+    hosts:
+    {{- range .Values.istio.gateway.hosts }}
+      - {{ . }}
+    {{- end }}
+    tls:
+      mode: PASSTHROUGH
+  - port:
+      number: {{ .Values.istio.gateway.ldap.port }}
+      name: {{ .Values.istio.gateway.ldap.name }}
+      protocol: TCP
+    hosts:
+    {{- range .Values.istio.gateway.hosts }}
+      - {{ . }}
+    {{- end }}
+{{- end }}

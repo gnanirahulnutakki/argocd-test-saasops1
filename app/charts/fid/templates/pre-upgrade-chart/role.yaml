@@ -1,0 +1,38 @@
+{{- if .Values.preUpgradeChart.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "fid.fullname" . }}-delete-resources-role
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-delete-policy": hook-succeeded,hook-failed,before-hook-creation
+    "argocd.argoproj.io/hook": PreSync
+    "argocd.argoproj.io/hook-delete-policy": HookSucceeded,HookFailed,BeforeHookCreation
+rules:
+  - apiGroups: ["apps"]
+    verbs:
+      - "get"
+      - "list"
+      - "delete"
+    resources:
+      - "deployments"
+      - "statefulsets"
+  # TODO do we need to set thos permissions?
+  - apiGroups: [""]
+    verbs:
+      - "get"
+      - "list"
+      - "delete"
+      - "patch"
+    resources:
+      - "pods"
+  - apiGroups: [""]
+    resources:
+      - "persistentvolumeclaims"
+    verbs:
+      - "get"
+      - "list"
+      - "patch"
+{{- end }}

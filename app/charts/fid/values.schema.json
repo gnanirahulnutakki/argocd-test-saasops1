@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "properties": {
+    "fid": {
+      "description": "FID Properties",
+      "properties": {
+        "license": {
+          "type": "string"
+        },
+        "rootPassword": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "license",
+        "rootUser",
+        "rootPassword"
+      ],
+      "type": "object"
+    }
+  },
+  "title": "Values",
+  "type": "object"
+}

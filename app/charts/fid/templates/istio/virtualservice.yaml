@@ -1,0 +1,54 @@
+{{- if .Values.istio.enabled }}
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ include "fid.fullname" . }}-vs
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+spec:
+  hosts:
+  {{- range .Values.istio.gateway.hosts }}
+    - {{ . }}
+  {{- end }}
+  gateways:
+  - {{ include "fid.fullname" . }}-gateway
+  http:
+  - match:
+    - port: {{ .Values.istio.gateway.http.iddm.port }}
+    route:
+    - destination:
+        host: {{ .Values.istio.gateway.http.iddm.serviceName }}
+        port:
+          number: {{ .Values.istio.gateway.http.iddm.servicePort }}
+  tls:
+  - match:
+    - port: {{ .Values.istio.gateway.https.iddm.port }}
+      sniHosts:
+    {{- range .Values.istio.gateway.hosts }}
+      - {{ . }}
+    {{- end }}      
+    route:
+    - destination:
+        host: {{ .Values.istio.gateway.http.iddm.serviceName }}
+        port:
+          number: {{ .Values.istio.gateway.http.iddm.servicePort }}
+  - match:
+    - port: {{ .Values.istio.gateway.ldaps.port }}
+      sniHosts:
+    {{- range .Values.istio.gateway.hosts }}
+      - {{ . }}
+    {{- end }}
+    route:
+    - destination:
+        host: {{ include "fid.fullname" . }}-app
+        port:
+          number: 2636
+  tcp:
+  - match:
+    - port: {{ .Values.istio.gateway.ldap.port }}
+    route:
+    - destination:
+        host: {{ include "fid.fullname" . }}-app
+        port:
+          number: 2389
+{{- end }}

@@ -1,0 +1,55 @@
+{{- if eq .Values.hooks.hooks_sa.enabled true }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "fid.fullname" . }}-hook-account
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "fid.fullname" . }}-manage-pods
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+rules:
+  # Core resources used by pre-upgrade/post-delete hooks:
+  # - configmaps: sentinel state + legacy migration state
+  # - pods: hook Job pod creation, status checks, describe/logs for debug
+  # - persistentvolumeclaims: follower cleanup (Job 3), label/annotation patching
+  # - services: pre-upgrade-chart inspects headless services for selector drift
+  # - secrets: pre-upgrade jobs read root/license secrets
+  # - nodes: select scripts call `kubectl get nodes` for placement checks
+  - apiGroups: [""]
+    resources: ["configmaps", "pods", "persistentvolumeclaims", "services", "secrets", "nodes"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+  # Subresources for `kubectl exec` (cluster.sh leader check) and `kubectl logs`
+  # (worker log streaming in Job 2's orchestrator pod)
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/log"]
+    verbs: ["create", "get"]
+  # Apps resources used by pre-upgrade-chart (delete+patch drifted selectors)
+  # and by HDAP migration hooks (scale, image patches, wait for rollout)
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "deployments"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+  # Scale subresource for `kubectl scale`
+  - apiGroups: ["apps"]
+    resources: ["statefulsets/scale", "deployments/scale"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "fid.fullname" . }}-manage-pods
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "fid.fullname" . }}-hook-account
+roleRef:
+  kind: Role
+  name: {{ include "fid.fullname" . }}-manage-pods
+  apiGroup: rbac.authorization.k8s.io
+
+{{- end }}

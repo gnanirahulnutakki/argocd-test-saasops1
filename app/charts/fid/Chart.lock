@@ -1,0 +1,12 @@
+dependencies:
+- name: zookeeper-helm
+  repository: oci://registry-1.docker.io/radiantone
+  version: 0.1.6
+- name: fluent-bit
+  repository: https://fluent.github.io/helm-charts
+  version: 0.39.0
+- name: common
+  repository: https://charts.bitnami.com/bitnami
+  version: 2.36.0
+digest: sha256:7121a07dca8cbdb5cba15289cfb55926de311ce6727eb3af5ef1bec2c58cc046
+generated: "2026-03-17T14:30:55.934073-05:00"

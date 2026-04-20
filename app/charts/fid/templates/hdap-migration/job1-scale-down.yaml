@@ -1,0 +1,353 @@
+{{/*
+=============================================================================
+Job 1 — HDAP Scale-Down
+-----------------------------------------------------------------------------
+Runs at PreSync sync-wave 10 (AFTER pre-upgrade-chart at wave 0).
+
+Responsibilities:
+  1. Exit cleanly on fresh install (no StatefulSet).
+  2. Exit cleanly when the live FID STS is already at v9 (resync / already
+     upgraded).
+  3. On a genuine v8.4.x → v9 upgrade: transfer leadership to fid-0, scale
+     the STS to 0, wait for pods to terminate, write the sentinel CM with
+     phase=ready-for-export and ownerReferences pointing at the dedicated SA.
+
+Render gate:
+  Target image tag has major version 9. Applies to v9 installs and v9
+  upgrades alike. On non-v9 targets nothing renders.
+
+Runtime short-circuit:
+  Primary check is the LIVE StatefulSet image — if it's already v9, skip.
+  Secondary check is the sentinel CM — handles in-flight upgrades where
+  a prior Job 1 run already scaled down and wrote ready-for-export.
+=============================================================================
+*/}}
+{{- $targetTag := (.Values.image.tag | default .Chart.AppVersion) -}}
+{{- $targetMajor := (index (splitList "." (index (splitList "-" $targetTag) 0)) 0) -}}
+{{- if eq $targetMajor "9" }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "fid.fullname" . }}-hdap-scale-down
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+    app.kubernetes.io/core-name: {{ include "fid.name" . }}
+    app.kubernetes.io/component: hdap-scale-down
+  annotations:
+    "helm.sh/hook": pre-upgrade,pre-install
+    "helm.sh/hook-weight": "10"
+    "argocd.argoproj.io/hook": PreSync
+    "argocd.argoproj.io/sync-wave": "10"
+    {{- if .Values.hdapMigration.job.delete }}
+    "helm.sh/hook-delete-policy": before-hook-creation
+    "argocd.argoproj.io/hook-delete-policy": HookFailed
+    {{- end }}
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: hdap-scale-down
+        {{- include "common.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "fid.fullname" . }}-hdap-migration-sa
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      {{- else }}
+      {{- with .Values.global.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      {{- if .Values.tolerations }}
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      {{- else }}
+      {{- with .Values.global.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      {{- if .Values.affinity }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- else }}
+      {{- with .Values.global.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      containers:
+        - name: hdap-scale-down
+          image: {{ .Values.hdapMigration.scaleDownImage.repository }}:{{ .Values.hdapMigration.scaleDownImage.tag }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              FID_STS="{{ include "fid.fullname" . }}"
+              NS="{{ .Release.Namespace }}"
+              SENTINEL_CM="{{ include "fid.fullname" . }}-hdap-migration-state"
+              SA_NAME="{{ include "fid.fullname" . }}-hdap-migration-sa"
+              TARGET_VERSION="{{ .Values.image.tag | default .Chart.AppVersion }}"
+              MAX_RETRIES=3
+              RETRY_DELAY=5
+
+              retry() {
+                local n=0
+                until [ "$n" -ge "$MAX_RETRIES" ]; do
+                  "$@" && return 0
+                  n=$((n+1))
+                  echo "Attempt $n/$MAX_RETRIES failed. Retrying in ${RETRY_DELAY}s..."
+                  sleep $RETRY_DELAY
+                done
+                echo "ERROR: Command failed after $MAX_RETRIES attempts: $*"
+                return 1
+              }
+
+              # Fetch SA UID for sentinel ownerReferences. Retry: SA just got
+              # (re)created in the same PreSync phase by before-hook-creation,
+              # there can be a brief propagation delay.
+              SA_UID=""
+              for i in 1 2 3 4 5 6; do
+                SA_UID=$(kubectl get sa "$SA_NAME" -n "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+                [ -n "$SA_UID" ] && break
+                echo "SA $SA_NAME UID not yet available (attempt $i/6). Waiting..."
+                sleep 5
+              done
+              if [ -z "$SA_UID" ]; then
+                echo "ERROR: Could not fetch UID for ServiceAccount $SA_NAME after 30s."
+                echo "       Sentinel ownerReferences require this UID for GC cleanup."
+                exit 1
+              fi
+              echo "SA $SA_NAME UID = $SA_UID"
+
+              # write_sentinel PHASE [extra-key=value...]
+              # Creates/updates the sentinel CM with phase + ownerReferences.
+              # Using kubectl apply so repeated calls within one Job are idempotent.
+              write_sentinel() {
+                local phase="$1"; shift
+                local extra_data=""
+                for kv in "$@"; do
+                  key="${kv%%=*}"; val="${kv#*=}"
+                  extra_data="${extra_data}  ${key}: \"${val}\"
+              "
+                done
+                cat <<YAML | kubectl apply -f - > /dev/null
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: ${SENTINEL_CM}
+                namespace: ${NS}
+                labels:
+                  app.kubernetes.io/component: hdap-migration
+                  app.kubernetes.io/name: {{ include "fid.name" . }}
+                  app.kubernetes.io/instance: {{ .Release.Name }}
+                ownerReferences:
+                  - apiVersion: v1
+                    kind: ServiceAccount
+                    name: ${SA_NAME}
+                    uid: ${SA_UID}
+                    blockOwnerDeletion: false
+              data:
+                phase: "${phase}"
+                timestamp: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              ${extra_data}
+              YAML
+              }
+
+              SENTINEL_PHASE=$(kubectl get configmap "$SENTINEL_CM" -n "$NS" -o jsonpath='{.data.phase}' 2>/dev/null || true)
+
+              # ── FRESH-INSTALL SHORT-CIRCUIT ─────────────────────────────
+              if ! kubectl get statefulset "$FID_STS" -n "$NS" > /dev/null 2>&1; then
+                echo "StatefulSet $FID_STS not found in namespace $NS."
+                echo "Fresh install of v9 — no HDAP migration required. Exiting cleanly."
+                exit 0
+              fi
+
+              # ── ALREADY-V9 SHORT-CIRCUIT (primary check) ────────────────
+              # Read the LIVE STS image. If it's already v9, migration either
+              # completed successfully or was never needed — skip.
+              LIVE_IMAGE=$(kubectl get statefulset "$FID_STS" -n "$NS" \
+                -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+              CURRENT_VERSION="${LIVE_IMAGE##*:}"
+              if [ -z "$CURRENT_VERSION" ] || [ "$CURRENT_VERSION" = "$LIVE_IMAGE" ]; then
+                CURRENT_VERSION=$(kubectl get statefulset "$FID_STS" -n "$NS" \
+                  -o jsonpath='{.metadata.labels.app\.kubernetes\.io/version}' 2>/dev/null || echo "")
+              fi
+
+              if [ -z "$CURRENT_VERSION" ]; then
+                echo "ERROR: Could not determine current FID version from STS."
+                exit 1
+              fi
+
+              echo "Current FID version: $CURRENT_VERSION"
+              echo "Target  FID version: $TARGET_VERSION"
+
+              # Strip pre-release suffix (8.4.0-alpha.1 -> 8.4.0) then compare majors.
+              CURRENT_MAJOR="${CURRENT_VERSION%%-*}"
+              CURRENT_MAJOR="${CURRENT_MAJOR%%.*}"
+              if [ "$CURRENT_MAJOR" = "9" ] || [ "$CURRENT_MAJOR" -gt 9 ] 2>/dev/null; then
+                echo "Current version already at major >= 9. No migration needed. Exiting."
+                exit 0
+              fi
+
+              # Version gate — must be 8.4.0 or higher
+              ver_gte() {
+                local a="${1%%-*}" b="${2%%-*}"
+                local IFS=.
+                set -- $a; local a1=$1 a2=${2:-0} a3=${3:-0}
+                set -- $b; local b1=$1 b2=${2:-0} b3=${3:-0}
+                [ "$a1" -gt "$b1" ] && return 0
+                [ "$a1" -lt "$b1" ] && return 1
+                [ "$a2" -gt "$b2" ] && return 0
+                [ "$a2" -lt "$b2" ] && return 1
+                [ "$a3" -ge "$b3" ] && return 0
+                return 1
+              }
+
+              if ! ver_gte "$CURRENT_VERSION" "8.4.0"; then
+                echo "ERROR: Current version $CURRENT_VERSION is below 8.4.0."
+                echo "       HDAP migration requires FID >= 8.4.0 (rli.migration.hdap.all added in 8.4.0)."
+                echo "       Upgrade to FID 8.4.x first, then re-run the v9 upgrade."
+                exit 1
+              fi
+
+              echo "Version gate passed: $CURRENT_VERSION -> $TARGET_VERSION"
+
+              # ── RESUME SHORT-CIRCUIT ────────────────────────────────────
+              # On an in-flight upgrade re-sync: the STS is already scaled to 0
+              # from the previous Job 1 run, and the sentinel is present.
+              CURRENT_REPLICAS=$(kubectl get statefulset "$FID_STS" -n "$NS" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "")
+              if [ "$CURRENT_REPLICAS" = "0" ] && [ -n "$SENTINEL_PHASE" ]; then
+                echo "STS already at 0 replicas and sentinel phase=$SENTINEL_PHASE."
+                echo "Job 1 already ran in a prior sync — skipping leader transfer + scale-down."
+                exit 0
+              fi
+
+              echo "Proceeding with HDAP pre-upgrade export preparation."
+
+              # ── TRANSFER LEADERSHIP TO fid-0 ────────────────────────────
+              LEADER_POD="${FID_STS}-0"
+
+              echo "Waiting for $LEADER_POD to be Ready before leader check..."
+              READY_POLLS=0
+              READY_MAX=30
+              while [ "$READY_POLLS" -lt "$READY_MAX" ]; do
+                if kubectl get pod "$LEADER_POD" -n "$NS" \
+                    -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null \
+                    | grep -q "True"; then
+                  break
+                fi
+                READY_POLLS=$((READY_POLLS + 1))
+                sleep 2
+              done
+              if [ "$READY_POLLS" -ge "$READY_MAX" ]; then
+                echo "ERROR: $LEADER_POD not Ready after $((READY_MAX * 2))s."
+                exit 1
+              fi
+
+              echo "Checking cluster leader via cluster.sh list..."
+              LEADER_TABLE=$(kubectl exec "$LEADER_POD" -n "$NS" -c fid -- \
+                /opt/radiantone/vds/bin/advanced/cluster.sh list 2>&1)
+              EXEC_RC=$?
+              if [ $EXEC_RC -ne 0 ] || [ -z "$LEADER_TABLE" ]; then
+                echo "ERROR: cluster.sh list exec failed (rc=$EXEC_RC). Output tail:"
+                echo "$LEADER_TABLE" | tail -20
+                exit 1
+              fi
+              echo "$LEADER_TABLE" | grep -E "^\| ${FID_STS}-[0-9]\.|^\+---" || true
+
+              FID0_ROW=$(echo "$LEADER_TABLE" | grep -E "^\| ${FID_STS}-0\." | head -1)
+              if [ -z "$FID0_ROW" ]; then
+                echo "ERROR: ${FID_STS}-0 not found in cluster.sh list output."
+                exit 1
+              fi
+              FID0_VDS_LEADER=$(echo "$FID0_ROW" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $5); print $5}')
+              FID0_CLOUD_ID=$(echo "$FID0_ROW"  | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $3); print $3}')
+              echo "fid-0 VDS Leader='$FID0_VDS_LEADER' Cloud ID='$FID0_CLOUD_ID'"
+
+              if [ "$FID0_VDS_LEADER" != "true" ]; then
+                echo "fid-0 is NOT the VDS Leader. Transferring leadership..."
+                if [ -z "$FID0_CLOUD_ID" ]; then
+                  echo "ERROR: Could not determine fid-0's Cloud ID."
+                  exit 1
+                fi
+
+                kubectl exec "$LEADER_POD" -n "$NS" -- \
+                  /opt/radiantone/vds/bin/advanced/cluster.sh \
+                  force-vds-leader vds_server "$FID0_CLOUD_ID"
+
+                echo "Waiting for leadership transfer to complete..."
+                TRANSFER_POLLS=0
+                TRANSFER_MAX=12
+                while [ "$TRANSFER_POLLS" -lt "$TRANSFER_MAX" ]; do
+                  if kubectl exec "$LEADER_POD" -n "$NS" -- \
+                    grep -q "I am the leader!" /opt/radiantone/vds/vds_server/logs/vds_server.log 2>/dev/null; then
+                    echo "Leadership transfer confirmed."
+                    break
+                  fi
+                  TRANSFER_POLLS=$((TRANSFER_POLLS + 1))
+                  echo "  Waiting... ($TRANSFER_POLLS/$TRANSFER_MAX)"
+                  sleep 5
+                done
+
+                VERIFY_TABLE=$(kubectl exec "$LEADER_POD" -n "$NS" -c fid -- \
+                  /opt/radiantone/vds/bin/advanced/cluster.sh list 2>&1 || true)
+                VERIFY_ROW=$(echo "$VERIFY_TABLE" | grep -E "^\| ${FID_STS}-0\." | head -1)
+                VERIFY_LEADER=$(echo "$VERIFY_ROW" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $5); print $5}')
+                echo "Post-transfer: fid-0 VDS Leader='$VERIFY_LEADER'"
+                if [ "$VERIFY_LEADER" != "true" ]; then
+                  echo "ERROR: Leadership transfer to fid-0 failed."
+                  exit 1
+                fi
+              else
+                echo "fid-0 is already the VDS Leader. No transfer needed."
+              fi
+
+              # ── WRITE SENTINEL: phase=ready-for-export ──────────────────
+              echo "Writing sentinel phase=ready-for-export (ownerRef -> $SA_NAME)..."
+              write_sentinel "ready-for-export" \
+                "from-version=$CURRENT_VERSION" \
+                "to-version=$TARGET_VERSION"
+
+              # ── SCALE DOWN FID STS ──────────────────────────────────────
+              echo "Scaling down StatefulSet $FID_STS to 0 replicas..."
+              retry kubectl scale statefulset "$FID_STS" -n "$NS" --replicas=0
+
+              if kubectl get statefulset "${FID_STS}-follower" -n "$NS" > /dev/null 2>&1; then
+                echo "Scaling down follower StatefulSet ${FID_STS}-follower..."
+                retry kubectl scale statefulset "${FID_STS}-follower" -n "$NS" --replicas=0
+              fi
+
+              echo "Waiting up to {{ .Values.hdapMigration.scaleDownTimeout }}s for FID pods to terminate..."
+              POLL_INTERVAL=10
+              MAX_POLLS=$(( {{ .Values.hdapMigration.scaleDownTimeout }} / POLL_INTERVAL ))
+              POLLS=0
+              while true; do
+                RUNNING=$(kubectl get pods -n "$NS" --no-headers 2>/dev/null \
+                  | awk '{print $1}' \
+                  | grep -E "^${FID_STS}-[0-9]+$" \
+                  | wc -l \
+                  | tr -d ' ')
+                if [ "$RUNNING" -eq 0 ]; then
+                  echo "All FID StatefulSet pods terminated."
+                  break
+                fi
+                POLLS=$(( POLLS + 1 ))
+                if [ "$POLLS" -ge "$MAX_POLLS" ]; then
+                  echo "ERROR: Timed out after {{ .Values.hdapMigration.scaleDownTimeout }}s — $RUNNING pod(s) still present."
+                  exit 1
+                fi
+                echo "  $RUNNING pod(s) still terminating... poll $POLLS/$MAX_POLLS"
+                sleep "$POLL_INTERVAL"
+              done
+
+              echo "Scale-down complete. PVC r1-pvc-${FID_STS}-0 is free for HDAP export."
+{{- end }}

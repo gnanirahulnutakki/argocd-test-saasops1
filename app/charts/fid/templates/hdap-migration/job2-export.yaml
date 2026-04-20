@@ -1,0 +1,324 @@
+{{/*
+=============================================================================
+Named template: HDAP export worker script
+-----------------------------------------------------------------------------
+Runs INSIDE the worker pod (not this orchestrator Job). The worker pod
+mounts r1-pvc-<fullname>-0 via PVC claim and uses the FID 8.4 image so it
+has Java 8 / Lucene 8 codecs needed to read the pre-v9 index format.
+
+Injected into the worker pod's args via `toRawJson` which handles all
+JSON escaping (quotes, newlines). The heredoc below is single-quoted
+('EOF') so shell expansion is deferred to the worker at runtime.
+=============================================================================
+*/}}
+{{- define "fid.hdapExportWorkerScript" -}}
+set -e
+echo "=== HDAP export worker pod starting ==="
+mkdir -p /opt/radiantone/vds/hdap-migration
+
+CLOUD_PROPS=/opt/radiantone/vds/vds_server/conf/cloud.properties
+if [ ! -f "$CLOUD_PROPS" ]; then
+  echo "ERROR: $CLOUD_PROPS not found on PVC"
+  exit 1
+fi
+ZK_SERVER=$(sed -n 's/^zk\.servers=//p' "$CLOUD_PROPS" | sed 's/\\//g')
+if [ -z "$ZK_SERVER" ]; then
+  echo "ERROR: zk.servers not found in $CLOUD_PROPS"
+  exit 1
+fi
+ZK_HOST=${ZK_SERVER%%:*}
+ZK_PORT=${ZK_SERVER##*:}
+[ "$ZK_PORT" = "$ZK_SERVER" ] && ZK_PORT=2181
+echo "Preflight: checking ZooKeeper at ${ZK_HOST}:${ZK_PORT}..."
+if ! nc -z -w 3 "$ZK_HOST" "$ZK_PORT"; then
+  echo "ERROR: Cannot reach ZooKeeper at ${ZK_HOST}:${ZK_PORT}"
+  exit 1
+fi
+
+echo "Starting HDAP export (Java 8 / Lucene 8 codecs)..."
+/opt/radiantone/vds/bin/advanced/migrate.sh export \
+  /opt/radiantone/vds/hdap-migration/java-21-export.zip \
+  rli.migration.hdap.all
+
+ZIP=/opt/radiantone/vds/hdap-migration/java-21-export.zip
+if [ ! -f "$ZIP" ]; then
+  echo "ERROR: Export ZIP not found at $ZIP"
+  exit 1
+fi
+SIZE=$(stat -c%s "$ZIP" 2>/dev/null || stat -f%z "$ZIP")
+if [ "$SIZE" -eq 0 ]; then
+  echo "ERROR: Export ZIP is 0 bytes"
+  exit 1
+fi
+ls -lh "$ZIP"
+SHA=$(sha256sum "$ZIP" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$ZIP" | awk '{print $1}')
+if [ -z "$SHA" ]; then
+  echo "ERROR: Could not compute SHA-256"
+  exit 1
+fi
+echo "ZIP_SIZE=$SIZE"
+echo "ZIP_SHA=$SHA"
+echo "EXPORT_OK"
+{{- end -}}
+
+{{/*
+=============================================================================
+Job 2 — HDAP Export (orchestrator)
+-----------------------------------------------------------------------------
+Runs at PreSync sync-wave 20 (after Job 1 scaled STS to 0).
+
+This orchestrator pod uses the kubectl image and does NOT mount the PVC
+itself — if it did, subsequent syncs on an already-upgraded v9 cluster
+would wedge with Multi-Attach errors when kubelet tries to attach a PVC
+that fid-0 already owns.
+
+On the happy path, the orchestrator checks the sentinel and either:
+  - exits <2s if sentinel=exported/completed or if the sentinel is missing
+    entirely (non-qualifying upgrade)
+  - spawns a worker pod that mounts the PVC, runs migrate.sh export,
+    then updates the sentinel to phase=exported
+=============================================================================
+*/}}
+{{- $targetTag := (.Values.image.tag | default .Chart.AppVersion) -}}
+{{- $targetMajor := (index (splitList "." (index (splitList "-" $targetTag) 0)) 0) -}}
+{{- if eq $targetMajor "9" }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "fid.fullname" . }}-hdap-export
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+    app.kubernetes.io/core-name: {{ include "fid.name" . }}
+    app.kubernetes.io/component: hdap-export
+  annotations:
+    "helm.sh/hook": pre-upgrade,pre-install
+    "helm.sh/hook-weight": "20"
+    "argocd.argoproj.io/hook": PreSync
+    "argocd.argoproj.io/sync-wave": "20"
+    {{- if .Values.hdapMigration.job.delete }}
+    "helm.sh/hook-delete-policy": before-hook-creation
+    "argocd.argoproj.io/hook-delete-policy": HookFailed
+    {{- end }}
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: hdap-export
+        {{- include "common.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "fid.fullname" . }}-hdap-migration-sa
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      {{- else }}
+      {{- with .Values.global.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # affinity deliberately NOT inherited from .Values.affinity — FID chart's
+      # podAntiAffinity would prevent this orchestrator from scheduling.
+      containers:
+        - name: hdap-export
+          image: {{ .Values.hdapMigration.scaleDownImage.repository }}:{{ .Values.hdapMigration.scaleDownImage.tag }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              FID_STS="{{ include "fid.fullname" . }}"
+              NS="{{ .Release.Namespace }}"
+              SENTINEL_CM="{{ include "fid.fullname" . }}-hdap-migration-state"
+              SA_NAME="{{ include "fid.fullname" . }}-hdap-migration-sa"
+              TARGET_VERSION="{{ .Values.image.tag | default .Chart.AppVersion }}"
+              WORKER_POD="{{ include "fid.fullname" . }}-hdap-export-worker"
+              WORKER_START_TIMEOUT_SEC=600
+              WORKER_RUN_TIMEOUT_SEC={{ .Values.hdapMigration.exportTimeout | default 1800 }}
+
+              # ── AUTO-DISCOVER WORKER IMAGE FROM STATEFULSET ───────────
+              STS_IMAGE=$(kubectl get statefulset "$FID_STS" -n "$NS" \
+                -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "")
+              if [ -n "$STS_IMAGE" ]; then
+                WORKER_IMAGE="$STS_IMAGE"
+                echo "Worker image auto-discovered from StatefulSet: $WORKER_IMAGE"
+              else
+                WORKER_IMAGE="{{ .Values.hdapMigration.image.repository }}:{{ .Values.hdapMigration.image.tag }}"
+                echo "WARN: Could not read StatefulSet image. Falling back to values.yaml: $WORKER_IMAGE"
+              fi
+              case "$WORKER_IMAGE" in
+                *:) echo "ERROR: Worker image tag is empty." >&2; exit 1 ;;
+                :*) echo "ERROR: Worker image repository is empty." >&2; exit 1 ;;
+              esac
+
+              # ── SENTINEL GATE (THE BUG FIX) ───────────────────────────
+              SENTINEL_PHASE=$(kubectl get configmap "$SENTINEL_CM" -n "$NS" \
+                -o jsonpath='{.data.phase}' 2>/dev/null || true)
+
+              if [ "$SENTINEL_PHASE" = "exported" ] || [ "$SENTINEL_PHASE" = "completed" ]; then
+                echo "Sentinel phase=$SENTINEL_PHASE. HDAP export already done. Skipping."
+                exit 0
+              fi
+
+              if [ "$SENTINEL_PHASE" != "ready-for-export" ]; then
+                echo "Sentinel phase='${SENTINEL_PHASE:-absent}'. Expected 'ready-for-export'."
+                echo "Non-qualifying upgrade (fresh install, already-v9 cluster, etc). Skipping."
+                exit 0
+              fi
+
+              echo "Sentinel phase=ready-for-export confirmed. Spawning worker pod..."
+
+              # ── FETCH SA UID (for sentinel update later) ──────────────
+              SA_UID=""
+              for i in 1 2 3 4 5 6; do
+                SA_UID=$(kubectl get sa "$SA_NAME" -n "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+                [ -n "$SA_UID" ] && break
+                sleep 5
+              done
+              if [ -z "$SA_UID" ]; then
+                echo "ERROR: Could not fetch SA $SA_NAME UID after 30s."
+                exit 1
+              fi
+
+              # ── CLEAN UP STALE WORKER ─────────────────────────────────
+              kubectl delete pod "$WORKER_POD" -n "$NS" --ignore-not-found --wait=true 2>/dev/null || true
+              trap 'kubectl delete pod "$WORKER_POD" -n "$NS" --ignore-not-found --wait=false 2>/dev/null || true' EXIT
+
+              # ── SPAWN WORKER POD ──────────────────────────────────────
+              # Quoted heredoc ('OVERRIDES_EOF') — keep $(...) / $VAR literal for the worker's runtime.
+              cat > /tmp/worker-overrides.json <<'OVERRIDES_EOF'
+              {
+                "apiVersion": "v1",
+                "metadata": {
+                  "labels": {
+                    "app.kubernetes.io/instance": "{{ .Release.Name }}",
+                    "app.kubernetes.io/name": "{{ include "fid.name" . }}",
+                    "app.kubernetes.io/component": "hdap-export-worker",
+                    "app.kubernetes.io/core-name": "{{ include "fid.name" . }}"
+                  }
+                },
+                "spec": {
+                  "restartPolicy": "Never",
+                  "serviceAccountName": "{{ include "fid.fullname" . }}-hdap-migration-sa",
+                  "imagePullSecrets": {{ .Values.imagePullSecrets | default list | toRawJson }},
+                  "nodeSelector": {{ (.Values.nodeSelector | default (.Values.global.nodeSelector | default dict)) | toRawJson }},
+                  "tolerations": {{ .Values.tolerations | default list | toRawJson }},
+                  "volumes": [{
+                    "name": "fid-data",
+                    "persistentVolumeClaim": { "claimName": "r1-pvc-{{ include "fid.fullname" . }}-0" }
+                  }],
+                  "containers": [{
+                    "name": "exporter",
+                    "image": "__WORKER_IMAGE__",
+                    "imagePullPolicy": "IfNotPresent",
+                    "command": ["/bin/sh", "-c"],
+                    "envFrom": [{ "configMapRef": { "name": "{{ include "fid.fullname" . }}" } }],
+                    "volumeMounts": [{ "name": "fid-data", "mountPath": "/opt/radiantone/vds" }],
+                    "args": [{{ include "fid.hdapExportWorkerScript" . | toRawJson }}]
+                  }]
+                }
+              }
+              OVERRIDES_EOF
+              sed -i "s|__WORKER_IMAGE__|$WORKER_IMAGE|g" /tmp/worker-overrides.json
+
+              kubectl run "$WORKER_POD" -n "$NS" \
+                --image="$WORKER_IMAGE" \
+                --restart=Never \
+                --overrides="$(cat /tmp/worker-overrides.json)"
+
+              # ── WAIT FOR WORKER TO START ──────────────────────────────
+              echo "Waiting for worker pod to start (up to ${WORKER_START_TIMEOUT_SEC}s)..."
+              POLL=0
+              MAX_POLL=$((WORKER_START_TIMEOUT_SEC / 5))
+              while true; do
+                PHASE=$(kubectl get pod "$WORKER_POD" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+                case "$PHASE" in
+                  Running|Succeeded) break ;;
+                  Failed)
+                    echo "Worker pod Failed during startup:"
+                    kubectl describe pod "$WORKER_POD" -n "$NS" | tail -30
+                    exit 1
+                    ;;
+                esac
+                POLL=$((POLL + 1))
+                if [ "$POLL" -ge "$MAX_POLL" ]; then
+                  echo "ERROR: Worker pod stuck in phase='$PHASE' after ${WORKER_START_TIMEOUT_SEC}s"
+                  kubectl describe pod "$WORKER_POD" -n "$NS" | tail -30
+                  exit 1
+                fi
+                sleep 5
+              done
+
+              # ── STREAM WORKER LOGS ────────────────────────────────────
+              echo "--- Worker pod logs (live stream) ---"
+              timeout "${WORKER_RUN_TIMEOUT_SEC}" kubectl logs -f "$WORKER_POD" -n "$NS" 2>&1 | tee /tmp/worker.log || true
+              echo "--- End of worker logs ---"
+
+              # ── WAIT FOR TERMINAL PHASE ───────────────────────────────
+              WORKER_TERMINAL_WAIT_SEC=60
+              FINAL_PHASE=""
+              elapsed=0
+              while [ "$elapsed" -lt "$WORKER_TERMINAL_WAIT_SEC" ]; do
+                FINAL_PHASE=$(kubectl get pod "$WORKER_POD" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+                case "$FINAL_PHASE" in
+                  Succeeded|Failed) break ;;
+                esac
+                sleep 2
+                elapsed=$((elapsed + 2))
+              done
+              if [ "$FINAL_PHASE" != "Succeeded" ]; then
+                echo "ERROR: Worker pod ended in phase='${FINAL_PHASE:-Unknown}' after ${elapsed}s"
+                kubectl describe pod "$WORKER_POD" -n "$NS" | tail -30
+                exit 1
+              fi
+
+              if ! grep -q '^EXPORT_OK$' /tmp/worker.log; then
+                echo "ERROR: Worker did not emit EXPORT_OK marker"
+                exit 1
+              fi
+              ZIP_SHA=$(grep '^ZIP_SHA=' /tmp/worker.log | tail -1 | cut -d= -f2)
+              if [ -z "$ZIP_SHA" ]; then
+                echo "ERROR: Could not extract ZIP_SHA from worker logs"
+                exit 1
+              fi
+
+              FROM_VERSION=$(kubectl get configmap "$SENTINEL_CM" -n "$NS" \
+                -o jsonpath='{.data.from-version}' 2>/dev/null || echo unknown)
+
+              # ── UPDATE SENTINEL: phase=exported ───────────────────────
+              cat <<YAML | kubectl apply -f - > /dev/null
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: ${SENTINEL_CM}
+                namespace: ${NS}
+                labels:
+                  app.kubernetes.io/component: hdap-migration
+                  app.kubernetes.io/name: {{ include "fid.name" . }}
+                  app.kubernetes.io/instance: {{ .Release.Name }}
+                ownerReferences:
+                  - apiVersion: v1
+                    kind: ServiceAccount
+                    name: ${SA_NAME}
+                    uid: ${SA_UID}
+                    blockOwnerDeletion: false
+              data:
+                phase: "exported"
+                from-version: "${FROM_VERSION}"
+                to-version: "${TARGET_VERSION}"
+                zip-sha256: "${ZIP_SHA}"
+                timestamp: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              YAML
+
+              echo "Sentinel updated: phase=exported"
+              echo "HDAP export complete. Job 3 will handle follower PVC cleanup."
+{{- end }}

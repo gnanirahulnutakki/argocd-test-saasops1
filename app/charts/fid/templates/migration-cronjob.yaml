@@ -1,0 +1,80 @@
+{{- if eq .Values.cronjob.migration.enabled true }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "fid.fullname" . }}-migration-cronjob-job
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.cronjob.migration.schedule | default "0 * * * *" }}
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: {{ include "fid.fullname" . }}-hook-account
+          {{- if .Values.podSecurityContext.enabled }}
+          securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.podSecurityContext "context" $) | nindent 12 }}
+          {{- end }}
+          containers:
+          - name: migration-cronjob
+            image: alpine
+            imagePullPolicy: IfNotPresent
+            {{- if .Values.securityContext.enabled }}
+            securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.securityContext "context" $) | nindent 14 }}
+            {{- end }}
+            resources:
+              requests:
+                cpu: 500m
+                memory: 512Mi
+            command: ["/bin/sh", "-c"]
+            args:
+              - |
+                set -ex
+
+                # TODO: generate a bucket if bucket does not exist
+                now=`date +%Y%m%d%H%M%S`
+                AWS_BUCKET={{ .Values.cronjob.migration.s3 | default "s3://fid-exports" }}
+                EXPORT_FILE_NAME=export-{{ .Values.image.tag | default .Chart.AppVersion }}-{{ .Release.Name }}-{{ .Release.Revision }}-$now.zip
+
+                echo "Starting migration cronjob at $now";
+                apk add --no-cache curl;
+                apk add aws-cli;
+                curl -LO https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl;
+                chmod +x ./kubectl;
+                mv ./kubectl /usr/local/bin;
+                kubectl get po -n {{ .Release.Namespace }};
+                kubectl exec -it fid-0 -n {{ .Release.Namespace }} -- bash -c "./migrate.sh export $EXPORT_FILE_NAME" ;
+                kubectl exec -it fid-0 -n {{ .Release.Namespace }} -- bash -c "ls -ltr /opt/radiantone/vds/work/" ;
+                kubectl -n {{ .Release.Namespace }} cp fid-0:/opt/radiantone/vds/work/$EXPORT_FILE_NAME $EXPORT_FILE_NAME ;
+                ls -ltr
+                aws s3 ls $AWS_BUCKET
+                aws s3 mv ./$EXPORT_FILE_NAME $AWS_BUCKET ;
+                echo done;
+          {{- if .Values.nodeSelector }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- else }}
+          {{- with .Values.global.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          {{- if .Values.tolerations }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- else }}
+          {{- with .Values.global.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          {{- with .Values.global.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          restartPolicy: OnFailure
+{{- end }}

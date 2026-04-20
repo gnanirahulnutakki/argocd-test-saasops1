@@ -1,0 +1,177 @@
+{{- if semverCompare ">=8.1-0" (.Values.image.tag | default .Chart.AppVersion) -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ (.Values.dataCatalog).serviceName | default "data-catalog-service" }}
+  labels:
+    app.kubernetes.io/component: data-catalog
+    {{- include "common.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/component: data-catalog
+    {{- include "common.selectorLabels" . | nindent 4 }}
+  ports:
+    - port: 80
+      name: http
+      targetPort: 8995
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-catalog
+  labels:
+    app.kubernetes.io/component: data-catalog
+    {{- include "common.labels" . | nindent 4 }}
+spec:
+  strategy:
+    type: RollingUpdate
+    # rollingUpdate:
+      # maxSurge: 1
+      # maxUnavailable: 1
+  revisionHistoryLimit: {{ (.Values.dataCatalog).revisionHistoryLimit | default 2 }}  
+  {{- if gt (.Values.replicaCount | int) 0}}
+  replicas: {{ (.Values.global.hibernate | default false) | ternary 0 (.Values.dataCatalog).replicas }}
+  {{- else }}
+  replicas: 0
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: data-catalog
+      {{- include "common.selectorLabels" . | nindent 6 }}      
+  template:
+    metadata:
+      {{- $logAnnotations := include "logging.annotations" (dict "component" .Values.dataCatalog "context" .) -}}
+      {{- if or $logAnnotations .Values.dataCatalog.podAnnotations }}
+      annotations:
+        {{- $logAnnotations | nindent 8 }}
+        {{- with .Values.dataCatalog.podAnnotations }}
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/component: data-catalog
+        {{- include "common.selectorLabels" . | nindent 8 }}
+        {{- include "iddm.podLabels" (dict "component" .Values.dataCatalog "context" .) | nindent 8 }}
+    spec:
+       {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 6 }}
+      {{- end }}
+      {{- if .Values.podSecurityContext.enabled }}
+      securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.podSecurityContext "context" $) | nindent 8 }}
+      {{- end }}
+      {{- if (.Values.dataCatalog).initEnabled }}
+      initContainers:
+        - name: check-fid
+          image: alpine:latest
+          imagePullPolicy: IfNotPresent
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          command: ['sh', '-c', 'until nc -w 2 -z $0 $1; do echo Waiting for FID -- $0:$1;sleep 2; done; echo Connection to FID ok -- $0:$1', '{{ include "fid.fullname" . }}-app', '2636']
+      {{- end }}
+      containers:
+        - name: data-catalog
+          image: "{{ ((.Values.dataCatalog).image).repository | default "radiantone/iddm-data-catalog" }}:{{ ((.Values.dataCatalog).image).tag | default .Chart.AppVersion }}"
+          imagePullPolicy: Always
+          {{- if .Values.securityContext.enabled }}
+          securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.securityContext "context" $) | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml (.Values.dataCatalog).resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8995
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            failureThreshold: 10
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8995
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            failureThreshold: 10
+          envFrom:
+            - secretRef:
+                name: api-secrets
+          env:
+          {{- include "zipkin.v8.env" . | nindent 12 }}
+          {{- include "fid.v8.zk_values" . | nindent 12 }}
+            - name: JDK_JAVA_OPTIONS
+              value: -Dorg.apache.catalina.connector.CoyoteAdapter.ALLOW_BACKSLASH=true
+                -Dorg.apache.tomcat.util.buf.UDecoder.ALLOW_ENCODED_SLASH=true
+          {{- if .Values.sentryDSN }}
+            - name: SENTRY_DSN
+              value: {{ .Values.sentryDSN }}
+            - name: SENTRY_ENABLED
+              value: "true"
+          {{- end }}
+          {{- if .Values.fid.adminApiKey }}
+            - name: IDDM_API_KEY
+              value: {{ .Values.fid.adminApiKey }}
+          {{- else }}
+            - name: IDDM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: fid-admin-api-key
+                  name: rootcreds-{{ template "fid.fullname" . }}
+                  optional: true
+          {{- end }}    
+          {{- if .Values.httpRequestTimeout }}
+            - name: HTTP_REQUEST_TIMEOUT
+              value: "{{ .Values.httpRequestTimeout }}"
+          {{- end }}
+          # Add aditional env variables
+          {{- range $key, $value := (.Values.dataCatalog).env }}
+            - name: {{ tpl $key $ }}
+              value: {{ tpl (print $value) $ | quote }}
+          {{- end }}
+          # Add aditional global env variables
+          {{- range $key, $value := (.Values.global).env }}
+            - name: {{ tpl $key $ }}
+              value: {{ tpl (print $value) $ | quote }}
+          {{- end }}          
+          ports:
+            - containerPort: 9997
+              name: http
+              protocol: TCP
+      {{- if .Values.nodeSelector }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- else }}
+      {{- with .Values.global.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      {{- if .Values.tolerations }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- else }}
+      {{- with .Values.global.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      {{- if (.Values.dataCatalog).affinity }}
+      {{- with (.Values.dataCatalog).affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- else }}
+      {{- with .Values.global.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+{{- end }}      

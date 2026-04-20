@@ -1,0 +1,446 @@
+{{- if hasKey .Values.fid "followerOnly" }}
+{{- if .Values.fid.followerOnly.enabled }}
+###################################
+
+# This is a statefulset yaml file to deploy follower only nodes in FID cluster.
+# To know more about follower only nodes, please refer to product documentation
+
+###################################
+
+# Headless service
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fid.fullname" . }}-follower
+  labels:
+    {{- include "fid.labels" . | nindent 4 }}
+    app.kubernetes.io/follower-name: {{ include "fid.name" . }}
+spec:
+  ports:
+    - port: 9100
+      name: admin-http
+    - port: 9101
+      name: admin-https
+    - port: 2389
+      name: ldap
+    - port: 2636
+      name: ldaps
+  selector:
+    {{- include "fid.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/follower-name: {{ include "fid.name" . }}
+  type: ClusterIP
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ template "fid.fullname" . }}-follower
+  labels:
+    {{- include "fid.labels" . | nindent 4 }}
+    app.kubernetes.io/follower-name: {{ include "fid.name" . }}
+spec:
+  replicas: {{ .Values.fid.followerOnly.minReplicas }}
+  serviceName: {{ template "fid.fullname" . }}-follower
+  updateStrategy:
+    type: {{ .Values.updateStrategy | default "RollingUpdate" }}
+  selector:
+    matchLabels:
+      {{- include "fid.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/follower-name: {{ include "fid.name" . }}
+  template:
+    metadata:
+      {{- $logAnnotations := include "logging.annotations" (dict "component" .Values "context" .) -}}
+      {{- if or $logAnnotations .Values.podAnnotations }}
+      annotations:
+        {{- $logAnnotations | nindent 8 }}
+        {{- with .Values.podAnnotations }}
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      labels:
+        {{- include "fid.labels" . | nindent 8 }}
+        app.kubernetes.io/follower-name: {{ include "fid.name" . }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 6 }}
+      {{- end }}
+      {{- if .Values.podSecurityContext.enabled }}
+      securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.podSecurityContext "context" $) | nindent 8 }}
+      {{- end }}
+      initContainers:
+  {{- if .Values.zk.external }}
+      - name: check-zk
+        image: alpine:latest
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        imagePullPolicy: IfNotPresent
+        command: ['sh', '-c', 'until nc -w 2 -z $0 $1; do echo Waiting for zookeeper -- $0:$1;sleep 2; done; echo Connection to zookeeper ok -- $0:$1', '{{ (split ":" .Values.zk.connectionString)._0 }}', '{{ (split ":" .Values.zk.connectionString)._1 }}']
+  {{- end }}
+      - name: check-fid
+        image: alpine:latest
+        imagePullPolicy: IfNotPresent
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        command: ['sh', '-c', 'until nc -w 2 -z $0 $1; do echo Waiting for FID -- $0:$1;sleep 2; done; echo Connection to FID ok -- $0:$1', '{{ include "fid.fullname" . }}-app', '2636']
+  {{- if hasKey .Values.sysctl "enabled" }}
+  {{- if .Values.sysctl.enabled }}
+      - name: sysctl
+        image: busybox:latest
+        imagePullPolicy: IfNotPresent
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        command: ["/bin/sh", "-c", "sysctl -w vm.max_map_count=262144 && set -e && ulimit -n 65536"]
+        securityContext:
+          privileged: true
+  {{- end }}
+  {{- end }}
+      containers:
+      - name: {{ .Chart.Name }}
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        {{- if .Values.securityContext.enabled }}
+        securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.securityContext "context" $) | nindent 10 }}
+        {{- end }}
+        lifecycle:
+          postStart:
+            exec:
+{{- if .Values.fid.mountSecrets }}
+              command: ["/bin/sh", "-c", "echo Copying license; cp /var/secrets/fid-license /opt/radiantone/vds/vds_server/license.lic"]
+{{- else }}
+              command: ["/bin/sh", "-c", "echo Hello from the myfid postStart handler > /opt/radiantone/vds/lifecycle.txt"]
+{{- end }}
+          preStop:
+            exec:
+{{- if .Values.fid.followerOnly.detach }}
+              command: ["/bin/sh", "-c", "/opt/radiantone/vds/bin/advanced/cluster.sh detach;rm /opt/radiantone/vds/vds_server/conf/cloud.properties"]
+{{- else }}
+              command: ["/opt/radiantone/vds/bin/stopVDSServer.sh"]
+{{- end }}
+        ports:
+        - containerPort: 2181
+          name: zk-client
+        - containerPort: 7070
+          name: cp-http
+        - containerPort: 7171
+          name: cp-https
+        - containerPort: 9100
+          name: admin-http
+        - containerPort: 9101
+          name: admin-https
+        - containerPort: 2389
+          name: ldap
+        - containerPort: 2636
+          name: ldaps
+        - containerPort: 8089
+          name: http
+        - containerPort: 8090
+          name: https
+        readinessProbe:
+          tcpSocket:
+            port: 2636
+          initialDelaySeconds: {{ .Values.fid.readinessProbe.initialDelaySeconds }}
+          timeoutSeconds: {{ .Values.fid.readinessProbe.timeoutSeconds }}
+          periodSeconds: 30
+          failureThreshold: 5
+          successThreshold: 1
+        livenessProbe:
+          exec:
+            command: [ "/opt/radiantone/check", "run", "-type", "liveness" ]
+          initialDelaySeconds: {{ .Values.fid.livenessProbe.initialDelaySeconds }}
+          timeoutSeconds: {{ .Values.fid.livenessProbe.timeoutSeconds }}
+          periodSeconds: 30
+          failureThreshold: 5
+          successThreshold: 1
+        envFrom:
+        - configMapRef:
+            name: {{ template "fid.fullname" . }}
+{{- if or .Values.envFromSecret (or .Values.envRenderSecret .Values.envFromSecrets) .Values.envFromConfigMaps }}
+      {{- if .Values.envFromSecret }}
+        - secretRef:
+            name: {{ tpl .Values.envFromSecret . }}
+      {{- end }}
+      {{- if .Values.envRenderSecret }}
+        - secretRef:
+            name: {{ include "fid.fullname" . }}-env
+      {{- end }}
+      {{- range .Values.envFromSecrets }}
+        - secretRef:
+            name: {{ tpl .name $ }}
+            optional: {{ .optional | default false }}
+      {{- end }}
+      {{- range .Values.envFromConfigMaps }}
+        - configMapRef:
+            name: {{ tpl .name $ }}
+            optional: {{ .optional | default false }}
+      {{- end }}
+{{- end }}
+        env:
+{{- if .Values.fid.mountSecrets }}
+{{- else }}
+        env:
+  {{- if .Values.fid.rootUser }}
+        - name: FID_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: rootcreds-{{ template "fid.fullname" . }}
+              key: fid-root-username
+  {{- end }}
+  {{- if .Values.fid.rootPassword }}
+        - name: FID_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: rootcreds-{{ template "fid.fullname" . }}
+              key: fid-root-password
+  {{- end }}
+  {{- if .Values.zk.username }}
+        - name: ZK_USER
+          valueFrom:
+            secretKeyRef:
+              name: rootcreds-{{ template "fid.fullname" . }}
+              key: zk-username
+  {{- end }}
+  {{- if .Values.zk.password }}
+        - name: ZK_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: rootcreds-{{ template "fid.fullname" . }}
+              key: zk-password
+  {{- end }}
+  {{- if .Values.fid.license }}
+        - name: LICENSE
+          valueFrom:
+            secretKeyRef:
+              name: rootcreds-{{ template "fid.fullname" . }}
+              key: fid-license
+  {{- end }}
+{{- end }}
+{{- range $key, $value := .Values.env }}
+        - name: "{{ tpl $key $ }}"
+          value: "{{ tpl (print $value) $ }}"
+{{- end }}
+        resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+        volumeMounts:
+        - name: r1-pvc
+          mountPath: /opt/radiantone/vds
+{{- if .Values.fid.mountSecrets }}
+        - name: fid-creds
+          mountPath: /var/secrets
+{{- end }}
+{{- if .Values.extraVolumeMounts }}
+     {{- include "common.tplvalues.render" ( dict "value" .Values.extraVolumeMounts "context" $ ) | nindent 8 }}
+{{- end }}
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            export CLUSTER=join;
+            export NODE_TYPE=follower;
+            ./run.sh fg
+{{- /* Get metrics and logging configurations */}}
+{{- $fluentdConfigType := include "fid.detectFluentdConfigType" . }}
+{{- $fluentdEnabled := false }}
+{{- $configFile := "/fluentd/etc/fluent.conf" }}
+{{- $pushMode := false }}
+{{- $pushGateway := "" }}
+{{- $pushMetricCron := "" }}
+{{- $image := "radiantone/fid-exporter:latest" }}
+{{- $imageTag := .Chart.AppVersion }}
+
+{{- if eq $fluentdConfigType "old" }}
+  {{- $fluentdEnabled = .Values.metrics.fluentd.enabled }}
+  {{- $configFile = .Values.metrics.fluentd.configFile | default "/fluentd/etc/fluent.conf" }}
+  {{- $pushMode = .Values.metrics.pushMode | default false }}
+  {{- $pushGateway = .Values.metrics.pushGateway | default "" }}
+  {{- $pushMetricCron = .Values.metrics.pushMetricCron | default "* * * * *" }}
+  {{- if .Values.metrics.fluentd.image }}
+    {{- $image = .Values.metrics.image }}
+    {{- $imageTag = .Values.metrics.imageTag }}
+  {{- end }}
+{{- else if eq $fluentdConfigType "new" }}
+  {{- $fluentdEnabled = .Values.logging.fluentd.enabled }}
+  {{- $configFile = .Values.logging.fluentd.configFile | default "/fluentd/etc/fluent.conf" }}
+  {{- $pushMode = .Values.metrics.pushMode | default false }}
+  {{- $pushGateway = .Values.metrics.pushGateway | default "" }}
+  {{- $pushMetricCron = .Values.metrics.pushMetricCron | default "* * * * *" }}
+  {{- if .Values.exporter.image }}
+    {{- $image = .Values.exporter.image }}
+    {{- $imageTag = .Values.exporter.imageTag }}
+  {{- end }}
+{{- end }}
+
+{{- if and (or .Values.metrics.enabled .Values.logging.enabled) $fluentdEnabled }}
+      - name: {{ .Chart.Name }}-exporter
+        image: "radiantone/fid-exporter:latest"
+        imagePullPolicy: Always
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        ports:
+        - containerPort: 9095
+          name: exporter
+        volumeMounts:
+        - name: r1-pvc
+          mountPath: /opt/radiantone/vds
+        {{- if $fluentdEnabled }}
+        - name: fluentd-config-volume
+          mountPath: /fluentd/etc
+        {{- end }}
+        {{- if .Values.securityContext.enabled }}
+        securityContext: {{- include "common.compatibility.renderSecurityContext" (dict "secContext" .Values.securityContext "context" $) | nindent 12 }}
+        {{- end }}
+        command: ["/bin/sh", "-c", "until nc -w 2 -z localhost 2636; do echo Waiting for fid on port 2636; sleep 10; done; echo \"FID is up!\" && /opt/fidexporter/entry.sh"]
+        env:
+        {{- if $pushMode }}
+        - name: PUSH_MODE
+          value: {{ $pushMode | quote }}
+        - name: PUSHGATEWAY_URI
+          value: {{ $pushGateway | quote }}
+        - name: PUSH_METRIC_CRON
+          value: {{ $pushMetricCron | quote }}
+        {{- end }}
+        - name: LDAP_URI
+          value: "ldaps://localhost:2636"
+        - name: JOB_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: {{ template "fid.fullname" . }}
+              key: ZK_CLUSTER
+        - name: BIND_DN
+        {{- if hasKey .Values.metrics "binddn" }}
+          value: {{ .Values.metrics.binddn | quote }}
+        {{- else }}
+          value: "uid=operator,ou=globalusers,cn=config"
+        {{- end }}
+        - name: BIND_PASSWORD
+        {{- if hasKey .Values.metrics "bindpassword" }}
+          value: {{ .Values.metrics.bindpassword | quote }}
+        {{- else }}
+          valueFrom:
+            secretKeyRef:
+              name: rootcreds-{{ template "fid.fullname" . }}
+              key: fid-root-password
+        {{- end }}
+        {{- if $fluentdEnabled }}
+        - name: FLUENTD_ENABLE
+          value: {{ $fluentdEnabled | quote }}
+        - name: FLUENTD_CONF
+          value: {{ $configFile | quote }}
+        {{- end }}
+{{- end }}  # End of metrics exporter container
+{{- if .Values.sidecars }}
+      {{- include "common.tplvalues.render" ( dict "value" .Values.sidecars "context" $ ) | nindent 6 }}
+{{- end }}
+{{- if .Values.nodeSelector }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- else }}
+      {{- with .Values.global.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- if .Values.tolerations }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- else }}
+      {{- with .Values.global.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- if .Values.affinity }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- else }}
+      {{- with .Values.global.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+      volumes:
+      - name: scripts
+        emptyDir: {}
+{{- if (.Values.fid.migration).file }}
+      - name: migrations
+        configMap:
+          name: {{ template "fid.fullname" . }}-migration
+{{- else }}
+      - name: migrations
+        emptyDir: {}
+{{- end }}
+{{- if .Values.fid.mountSecrets }}
+      - name: fid-creds
+        secret:
+          defaultMode: 288
+          secretName: rootcreds-{{ template "fid.fullname" . }}
+{{- end }}
+{{- if $fluentdEnabled }}
+      - name: fluentd-config-volume
+        configMap:
+          name: {{ template "fid.fullname" . }}-fluentd-config
+{{- end }}
+{{- if .Values.extraVolumes }}
+     {{- include "common.tplvalues.render" ( dict "value" .Values.extraVolumes "context" $ ) | nindent 6 }}
+{{- end }}
+  {{- with .Values.extraContainerVolumes }}
+  {{- tpl (toYaml .) $ | nindent 8 }}
+  {{- end }}
+{{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+  - apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: r1-pvc
+      annotations:
+      {{- range $key, $value := .Values.persistence.annotations }}
+        {{ $key }}: {{ $value }}
+      {{- end }}
+      labels:
+        {{- include "fid.selectorLabels" . | nindent 8 }}
+    spec:
+      accessModes:
+      {{- range .Values.persistence.accessModes }}
+      - {{ . | quote }}
+      {{- end }}
+      resources:
+        requests:
+          storage: {{ .Values.persistence.size | quote }}
+      {{- if .Values.persistence.storageClass }}
+      {{- if (eq "-" .Values.persistence.storageClass) }}
+      storageClassName: ""
+      {{- else }}
+      storageClassName: "{{ .Values.persistence.storageClass }}"
+      {{- end }}
+      {{- end }}
+{{- else }}
+      - name: r1-pvc
+        emptyDir: {}
+{{- end }}
+{{- end }}
+{{- end }}

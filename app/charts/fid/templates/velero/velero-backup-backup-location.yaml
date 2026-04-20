@@ -1,0 +1,29 @@
+{{- if and .Values.backup.enabled .Values.backup.velero.createResources (.Capabilities.APIVersions.Has "velero.io/v1/BackupStorageLocation") }}
+apiVersion: velero.io/v1
+kind: BackupStorageLocation
+metadata:
+  name: {{ .Release.Name }}-fid-bsl
+  namespace: {{ .Values.backup.velero.namespace }}
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+    app.kubernetes.io/component: velero
+spec:
+  provider: aws
+  backupSyncPeriod: {{ .Values.backup.velero.backupSyncPeriod | default "4h" }}
+  validationFrequency: {{ .Values.backup.velero.validationFrequency | default "4h" }}
+  accessMode: ReadWrite
+  objectStorage:
+    bucket: {{ .Values.backup.velero.bucket.name | quote }}
+    prefix: {{ .Values.backup.velero.bucket.prefix | default .Release.Name }}
+  config:
+    region: {{ .Values.backup.velero.bucket.region | quote }}
+    {{- with .Values.backup.velero.storageLocation }}
+    {{- toYaml .config | nindent 4 }}
+    {{- end }}
+  {{- if (.Values.backup.velero.storageLocation).credential }}
+  credential:
+    {{- with .Values.backup.velero.storageLocation }}
+    {{- toYaml .credential | nindent 4 }}
+    {{- end }}
+  {{- end -}}
+{{ end }}
