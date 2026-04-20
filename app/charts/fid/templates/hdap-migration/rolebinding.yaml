@@ -11,10 +11,10 @@ metadata:
   annotations:
     "helm.sh/hook": pre-upgrade,pre-install
     "helm.sh/hook-weight": "-5"
-    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-delete-policy": hook-succeeded,hook-failed,before-hook-creation
     "argocd.argoproj.io/hook": PreSync
     "argocd.argoproj.io/sync-wave": "-5"
-    "argocd.argoproj.io/hook-delete-policy": BeforeHookCreation
+    "argocd.argoproj.io/hook-delete-policy": HookSucceeded,HookFailed,BeforeHookCreation
 subjects:
   - kind: ServiceAccount
     name: {{ include "fid.fullname" . }}-hdap-migration-sa
