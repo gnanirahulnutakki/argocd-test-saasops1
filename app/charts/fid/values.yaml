@@ -1387,22 +1387,70 @@ hooks:
 hdapMigration:
   enabled: true
   run: true
+
+  # =========================================================================
+  # Upgrade compatibility
+  # -------------------------------------------------------------------------
+  # Declares the source FID version range this CHART release can migrate
+  # FROM. Update with every chart release whose migration support
+  # boundaries change (e.g., when a backport adds support for a previously-
+  # unsupported source version).
+  #
+  # Current schema (simple range):
+  #   minSourceVersion  Inclusive lower bound. Sources below this value
+  #                     cause Job 1 to fail loud with a clear error.
+  #   maxSourceVersion  Exclusive upper bound. Sources at or above this
+  #                     value are already at/past the target and Job 1
+  #                     short-circuits (no migration needed).
+  #
+  # Current chart (9.0.0-alpha.1):
+  #   minSourceVersion: "8.4.0"   — rli.migration.hdap.all added in 8.4.0
+  #   maxSourceVersion: "9.0.0"   — 9.x is target; no HDAP migration needed
+  #
+  # Example updates for future releases:
+  #   If HDAP migration is backported to 8.3.x → minSourceVersion: "8.3.0"
+  #   When chart targets v10 → maxSourceVersion: "10.0.0" + adjust mins
+  #
+  # -------------------------------------------------------------------------
+  # FUTURE: supportedUpgradePaths (multi-range + strategy dispatch)
+  # -------------------------------------------------------------------------
+  # When multiple concurrent source ranges need different migration
+  # strategies in the same chart release (e.g., 8.3.x via one path AND
+  # 8.4.x+ via another), switch to the richer schema below. Uncomment the
+  # block, remove minSourceVersion/maxSourceVersion above, and update
+  # Job 1's compatibility-check block to iterate over entries with jq.
+  #
+  # supportedUpgradePaths:
+  #   - minVersion: "8.4.0"
+  #     maxVersion: "9.0.0"
+  #     strategy: hdap-export-import
+  #     notes: |
+  #       FID 8.4.0 added rli.migration.hdap.all. Requires migrate.sh
+  #       export with Java 8 codecs before the v9 image boots.
+  #   - minVersion: "9.0.0"
+  #     maxVersion: "10.0.0"
+  #     strategy: noop
+  #     notes: Same-major upgrade — no HDAP export needed.
+  #   # Example future backport:
+  #   # - minVersion: "8.3.0"
+  #   #   maxVersion: "8.4.0"
+  #   #   strategy: hdap-export-import
+  #   #   notes: Requires 8.3.x with backported rli.migration.hdap.all.
+  # =========================================================================
+  compatibility:
+    minSourceVersion: "8.4.0"
+    maxSourceVersion: "9.0.0"
+
   # Image used by HDAP migration hook Jobs that need kubectl (Job 1 scale-down,
-  # Job 2 orchestrator, Job 3 PVC cleanup, post-delete sentinel cleanup).
-  # Debian-based Bitnami build includes full coreutils (date, sort, head, wc,
-  # awk, grep, sleep, bash, jq) — use instead of distroless kubectl images
-  # (e.g. rancher/kubectl, registry.k8s.io/kubectl) which lack /bin/sh.
+  # Job 2 orchestrator, Job 3 PVC cleanup).
   #
-  # Pinned to a concrete versioned tag rather than "latest" so upgrades behave
-  # deterministically. Bump deliberately when validated; do not depend on
-  # moving tags for hook execution.
-  #
-  # Namespace note: Broadcom moved Bitnami's versioned tags from "bitnami/"
-  # to "bitnamilegacy/" in 2025. bitnami/kubectl only publishes "latest" now;
-  # bitnamilegacy/kubectl retains the semver-pinned builds we need here.
+  # Uses the same image as pre-upgrade-chart (radiantone/kubectl:secure) for
+  # consistency across chart-internal tooling. This image is built and
+  # maintained by RadiantOne, ships with kubectl + bash + coreutils, and is
+  # already trusted by the chart for pre-upgrade operations.
   scaleDownImage:
-    repository: bitnamilegacy/kubectl
-    tag: "1.31.0"
+    repository: radiantone/kubectl
+    tag: "secure"
   image:
     # FALLBACK ONLY. The orchestrator auto-discovers the worker image from
     # the live StatefulSet at runtime — that's the image the tenant was

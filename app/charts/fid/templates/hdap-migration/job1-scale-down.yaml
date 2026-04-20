@@ -96,6 +96,10 @@ spec:
               SENTINEL_CM="{{ include "fid.fullname" . }}-hdap-migration-state"
               SA_NAME="{{ include "fid.fullname" . }}-hdap-migration-sa"
               TARGET_VERSION="{{ .Values.image.tag | default .Chart.AppVersion }}"
+              # Compatibility window — declared per chart release in values.yaml.
+              # See hdapMigration.compatibility for semantics.
+              MIN_SOURCE_VERSION="{{ .Values.hdapMigration.compatibility.minSourceVersion }}"
+              MAX_SOURCE_VERSION="{{ .Values.hdapMigration.compatibility.maxSourceVersion }}"
               MAX_RETRIES=3
               RETRY_DELAY=5
 
@@ -189,16 +193,11 @@ spec:
 
               echo "Current FID version: $CURRENT_VERSION"
               echo "Target  FID version: $TARGET_VERSION"
+              echo "Supported source range: [$MIN_SOURCE_VERSION, $MAX_SOURCE_VERSION)"
 
-              # Strip pre-release suffix (8.4.0-alpha.1 -> 8.4.0) then compare majors.
-              CURRENT_MAJOR="${CURRENT_VERSION%%-*}"
-              CURRENT_MAJOR="${CURRENT_MAJOR%%.*}"
-              if [ "$CURRENT_MAJOR" = "9" ] || [ "$CURRENT_MAJOR" -gt 9 ] 2>/dev/null; then
-                echo "Current version already at major >= 9. No migration needed. Exiting."
-                exit 0
-              fi
-
-              # Version gate — must be 8.4.0 or higher
+              # ── COMPATIBILITY WINDOW CHECK ──────────────────────────────
+              # Pure-bash semver comparison (no sort/head dependencies).
+              # Strips pre-release suffix (e.g., 8.4.0-alpha.1 → 8.4.0).
               ver_gte() {
                 local a="${1%%-*}" b="${2%%-*}"
                 local IFS=.
@@ -212,14 +211,27 @@ spec:
                 return 1
               }
 
-              if ! ver_gte "$CURRENT_VERSION" "8.4.0"; then
-                echo "ERROR: Current version $CURRENT_VERSION is below 8.4.0."
-                echo "       HDAP migration requires FID >= 8.4.0 (rli.migration.hdap.all added in 8.4.0)."
-                echo "       Upgrade to FID 8.4.x first, then re-run the v9 upgrade."
+              # Above or at maxSourceVersion → already at/past target; short-circuit.
+              if ver_gte "$CURRENT_VERSION" "$MAX_SOURCE_VERSION"; then
+                echo "Current $CURRENT_VERSION is at or above maxSourceVersion $MAX_SOURCE_VERSION."
+                echo "No migration needed for this chart release. Exiting cleanly."
+                exit 0
+              fi
+
+              # Below minSourceVersion → unsupported upgrade path; fail loud.
+              if ! ver_gte "$CURRENT_VERSION" "$MIN_SOURCE_VERSION"; then
+                echo "ERROR: Unsupported upgrade path."
+                echo "       Current version:     $CURRENT_VERSION"
+                echo "       Target version:      $TARGET_VERSION"
+                echo "       Supported range:     [$MIN_SOURCE_VERSION, $MAX_SOURCE_VERSION)"
+                echo ""
+                echo "       This chart release does not support migrating from $CURRENT_VERSION."
+                echo "       Upgrade first to a version within the supported range, then re-run"
+                echo "       the upgrade to the target version."
                 exit 1
               fi
 
-              echo "Version gate passed: $CURRENT_VERSION -> $TARGET_VERSION"
+              echo "Compatibility check passed: $CURRENT_VERSION is within [$MIN_SOURCE_VERSION, $MAX_SOURCE_VERSION)"
 
               # ── RESUME SHORT-CIRCUIT ────────────────────────────────────
               # On an in-flight upgrade re-sync: the STS is already scaled to 0

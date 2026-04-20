@@ -77,7 +77,7 @@ spec:
         - name: hdap-pvc-cleanup
           image: {{ .Values.hdapMigration.scaleDownImage.repository }}:{{ .Values.hdapMigration.scaleDownImage.tag }}
           imagePullPolicy: IfNotPresent
-          command: ["/bin/sh", "-c"]
+          command: ["/bin/bash", "-c"]
           args:
             - |
               set -e
