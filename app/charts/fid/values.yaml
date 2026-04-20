@@ -1444,13 +1444,21 @@ hdapMigration:
   # Image used by HDAP migration hook Jobs that need kubectl (Job 1 scale-down,
   # Job 2 orchestrator, Job 3 PVC cleanup).
   #
-  # Uses the same image as pre-upgrade-chart (radiantone/kubectl:secure) for
-  # consistency across chart-internal tooling. This image is built and
-  # maintained by RadiantOne, ships with kubectl + bash + coreutils, and is
-  # already trusted by the chart for pre-upgrade operations.
+  # Needs kubectl + bash + standard coreutils (grep, sleep, awk, sed, tr, wc,
+  # head, nc, sha256sum). bitnamilegacy/kubectl is a Debian-based image that
+  # ships all of these; radiantone/kubectl:secure is distroless-style and
+  # only has bash + kubectl (not enough for our migration scripts).
+  #
+  # Version pinned rather than :latest so upgrades behave deterministically.
+  # Broadcom migrated Bitnami's versioned tags from "bitnami/" to
+  # "bitnamilegacy/" in 2025; only latest remains in bitnami/ now.
+  #
+  # Future: if a radiantone/-namespaced image becomes available with
+  # coreutils, swap repository to that. Current pre-upgrade-chart uses
+  # radiantone/kubectl:secure but its scripts are light (no grep/sleep).
   scaleDownImage:
-    repository: radiantone/kubectl
-    tag: "secure"
+    repository: bitnamilegacy/kubectl
+    tag: "1.31.0"
   image:
     # FALLBACK ONLY. The orchestrator auto-discovers the worker image from
     # the live StatefulSet at runtime — that's the image the tenant was
